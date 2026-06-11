@@ -1,0 +1,227 @@
+Architecture de Conception d'un Agent Intelligent Autonome pour le Simulateur Yu-Gi-Oh! Omega
+Architecture Générale et Intégration des Règles du Jeu
+La création d'un agent autonome capable de jouer de manière optimale au jeu de cartes Yu-Gi-Oh! sur le simulateur YGO Omega requiert la résolution de verrous technologiques majeurs aux confins de la théorie des jeux, du calcul distribué et de l'apprentissage par renforcement profond.[1, 2] Yu-Gi-Oh! se définit mathématiquement comme un jeu d'information imparfaite à étapes finies et à couplage stochastique élevé, caractérisé par des espaces d'états gigantesques et des arbres de décision dynamiques hautement asymétriques.[2, 3] Contrairement aux jeux de plateau classiques, le problème consistant à déterminer s'il existe une stratégie gagnante à partir d'un état de jeu donné est formellement indécidable, se classant dans la catégorie de complexité Π 
+1
+1
+​
+ -complète.[3]
+Pour surmonter cette complexité sans exiger un coût de calcul prohibitif, l'agent ne doit pas tenter d'apprendre les règles fondamentales du jeu par simple tâtonnement statistique.[2] Une telle approche par apprentissage de bout en bout (end-to-end) s'avérerait incapable de converger en raison de la nature dynamique des restrictions, des interactions d'effets complexes et des mises à jour constantes de cartes.[2] À la place, l'architecture du système s'appuie sur un découpage strict entre le moteur de calcul des règles (le moteur logique) et le modèle de prise de décision stratégique (l'intelligence artificielle).[1, 2, 4, 5]
+La gestion des règles de jeu, des calculs de points de vie, de la résolution des chaînes d'effets et de la génération des actions légales est déléguée à une bibliothèque C++ hautement optimisée nommée ygopro-core ou ocgcore.[1, 4, 5] Cette bibliothèque est compilée de manière native pour servir d'émulateur ultra-rapide des mécaniques de Yu-Gi-Oh!.[1, 4] Elle traite les scripts Lua de chaque carte individuelle afin de garantir la conformité absolue avec les règles officielles de l'Official Card Game (OCG) et du Trading Card Game (TCG).[4, 5] L'intégration de ce moteur de règles permet d'exposer à chaque étape de décision un masque d'actions binaires valides, empêchant structurellement l'intelligence artificielle de soumettre des actions illégales.[1, 6]
+Composant Système
+Technologie Dominante
+Fonctionnalité Principale
+Moteur de Règles (Core)
+C++ (ocgcore / ygopro-core) [1, 4]
+Validation des actions, résolution des chaînes, calcul de l'état du terrain.[1, 4]
+Environnement Gym
+Python (ygoenv / envpool) [1]
+Parallélisation massive des duels sous forme de processus légers pour le RL.[1]
+Encodeur de Cartes
+LLM (embed.pkl / embeddings) [1]
+Traduction sémantique continue des effets textuels en vecteurs numériques.[1]
+Modèle Décisionnel
+JAX / Deep RL (PPO + LSTM) [1]
+Évaluation de la valeur de l'état de jeu et sélection de la meilleure action.[1]
+Module de Recherche
+Gumbel AlphaZero / MCTS [2]
+Planification prospective multi-coups et simulation des états cachés.[2]
+Interface Client
+C# (DuelBotWrapper / YGO Omega) [7, 8]
+Interception de l'état graphique et transmission réseau des commandes de jeu.[7, 8]
+--------------------------------------------------------------------------------
+Modélisation de l'Environnement et de l'Espace des États
+Le développement d'un agent intelligent requiert la mise en place d'un environnement d'entraînement performant capable de simuler des millions de transitions par seconde.[1, 2] Le projet open-source ygo-agent répond à ce besoin en développant ygoenv, un wrapper d'apprentissage par renforcement construit par-dessus envpool et ygopro-core.[1] Cet environnement implémente les interfaces standards d'OpenAI Gym, permettant à un agent externe de manipuler le jeu à l'aide d'observations vectorisées et de masques d'actions.[1]
+Vectorisation de l'état de jeu
+À chaque étape temporelle t, l'environnement extrait un état de jeu structuré sous la forme de tenseurs de caractéristiques. Cet état comprend la configuration physique du terrain, notamment les cartes présentes dans la main, le cimetière, la zone de bannissement, le Deck et l'Extra Deck, ainsi que les zones de monstres et de magie/piège.[9] Les attributs de chaque carte (attaque, défense, niveau, type, compteurs accumulés, orientation) sont convertis en représentations binaires ou numériques normalisées.[10] De plus, les informations globales telles que les points de vie de chaque joueur, l'identité du joueur actif, la phase de jeu en cours et les indicateurs de chaînes d'effets sont directement injectées dans le vecteur d'observation.[1, 10]
+Représentation sémantique des cartes par grands modèles de langage
+L'un des défis intrinsèques de Yu-Gi-Oh! réside dans la présence de milliers de cartes uniques dotées de conditions d'activation et d'effets textuels hautement spécifiques.[11] Une indexation par identifiants discrets (passcodes) échouerait à généraliser l'apprentissage aux nouvelles extensions de cartes.[1] L'architecture résout cette problématique en employant un grand modèle de langage (LLM) configuré hors ligne.[1] Le LLM extrait les descriptions textuelles officielles de la base de données YGOPRODeck, régies par la syntaxe standardisée du Problem-Solving Card Text (PSCT).[10, 12]
+Le modèle projette ces descriptions textuelles complexes dans un espace vectoriel sémantique continu.[1] Les vecteurs de plongement (embeddings) ainsi générés capturent la similarité fonctionnelle des cartes (par exemple, regrouper les effets de destruction de monstres ou de tutorat de deck).[1] Ces embeddings sont compilés et sauvegardés dans un fichier sérialisé nommé embed.pkl.[1] Lors de l'initialisation de l'environnement, le réseau de neurones de l'agent récupère les embeddings correspondants aux cartes du duel, ce qui lui permet de traiter et de comprendre instantanément des cartes qu'il n'a jamais rencontrées lors de sa phase d'entraînement, assurant ainsi une généralisation à tolérance zéro (zero-shot generalization).[1]
+--------------------------------------------------------------------------------
+Modélisation Algorithmique : Deep RL, LSTM et Planification MCTS
+Pour maximiser le taux de victoire contre des adversaires de niveau expert, l'agent doit être capable d'exécuter des enchaînements d'actions complexes (combos) tout en planifiant ses coups face à des variables cachées.[2, 11] Le cadre mathématique modélise cette dynamique comme un Processus de Décision Markovien Partiellement Observable (POMDP).
+Réseaux de Neurones Récurrents pour la Mémoire Temporelle
+Puisque l'agent n'a pas accès à l'intégralité du statut du jeu (les cartes dans la main de l'adversaire ou face cachée restant inconnues jusqu'à leur activation), l'utilisation d'un réseau de neurones purement réactif (feedforward) est insuffisante.[2] L'architecture décisionnelle intègre par conséquent des couches de mémoire à long et court terme (LSTM) au sein de sa politique.[1] Le réseau LSTM traite la séquence temporelle des observations et des actions passées, construisant une représentation interne de l'état de croyance (belief state) de la partie, essentielle pour déduire les cartes adverses et bluffer efficacement.[1, 2]
+Apprentissage par Renforcement Profond sous JAX
+L'apprentissage s'effectue via l'algorithme Proximal Policy Optimization (PPO), implémenté sous le framework JAX pour bénéficier d'une vitesse de calcul et d'une vectorisation de pointe sur processeur graphique.[1, 2] Le réseau d'acteur (politique π 
+θ
+​
+ ) et le réseau de critique (estimateur de valeur V 
+ϕ
+​
+ ) sont mis à jour conjointement.[1] L'objectif de la politique utilise une fonction de perte écrêtée afin d'éviter des oscillations excessives lors des mises à jour de paramètres :
+L 
+CLIP
+ (θ)= 
+E
+^
+  
+t
+​
+ [min(r 
+t
+​
+ (θ) 
+A
+^
+  
+t
+​
+ ,clip(r 
+t
+​
+ (θ),1−ϵ,1+ϵ) 
+A
+^
+  
+t
+​
+ )]
+Dans cette expression, le ratio de probabilité s'écrit :
+r 
+t
+​
+ (θ)= 
+π 
+θ 
+old
+​
+ 
+​
+ (a 
+t
+​
+ ∣s 
+t
+​
+ )
+π 
+θ
+​
+ (a 
+t
+​
+ ∣s 
+t
+​
+ )
+​
+ 
+La fonction d'avantage  
+A
+^
+  
+t
+​
+  est estimée à l'aide de la méthode Generalized Advantage Estimation (GAE), optimisée par le réseau de critique afin de minimiser l'écart quadratique moyen avec les gains réels obtenus en fin de partie :
+L 
+VF
+ (ϕ)= 
+2
+1
+​
+  
+E
+^
+  
+t
+​
+ [(V 
+ϕ
+​
+ (s 
+t
+​
+ )−z 
+t
+​
+ ) 
+2
+ ]
+Recherche Prospective sous Information Imparfaite
+Afin de surmonter la tendance des algorithmes de type PPO à privilégier des décisions à court terme, l'agent intègre l'algorithme Gumbel AlphaZero couplé à une recherche arborescente de Monte Carlo (MCTS).[2] L'implémentation de la recherche arborescente dans un environnement à information imparfaite s'organise selon un protocole double [2] :
+Phase d'Entraînement par Auto-Jeu (Self-Play) : L'algorithme d'apprentissage est temporairement configuré en mode d'omniscience.[2] Bien que le réseau de neurones de la politique reste aveugle aux données cachées, l'arborescence MCTS s'appuie sur le véritable état du monde pour simuler les coups futurs.[2] Cela permet d'accélérer considérablement la découverte d'enchaînements de cartes optimaux.[2] L'utilisation de Gumbel AlphaZero garantit des mises à jour stables de la politique de décision, même avec un nombre de simulations par nœud restreint, ce qui prévient un biais d'omniscience trop prononcé.[2]
+Phase d'Inférence et d'Exécution en Partie Réelle : Lorsque l'agent affronte un adversaire humain ou un autre bot en situation de compétition, l'accès aux variables cachées est rigoureusement coupé.[2] L'agent utilise alors l'algorithme Information Set MCTS (IS-MCTS).[2] À chaque décision, le système génère un ensemble d'états plausibles du jeu par échantillonnage de Monte Carlo (en supposant de façon uniforme ou pondérée la distribution des cartes cachées dans la main adverse et le Deck).[2] Des recherches prospectives parallèles sont menées sur ces états factices afin de déterminer l'action qui offre l'espérance de récompense la plus élevée sur l'ensemble des scénarios imaginés.[2]
+--------------------------------------------------------------------------------
+Protocole d'Intégration Technique et Communication avec YGO Omega
+Pour que l'intelligence artificielle puisse jouer de manière autonome sur le simulateur YGO Omega, elle doit être reliée au client graphique par un protocole d'échange réseau performant.[1, 5, 7]
+Intégration Native dans le Code Source d'YGO Omega
+YGO Omega intègre une architecture de bots codée en C# s'appuyant sur le SDK.NET.[7] Les fichiers de base permettant de déclarer et de configurer un bot sont situés dans l'arborescence logique sous le chemin d'accès Game > AI > Bots > MasterDuel.[7] Le développeur doit y créer deux fichiers sources essentiels [7] :
+Fichier de Constantes de Cartes : Le fichier nommé TutorialTestCardId.cs sert à répertorier les identifiants uniques (passcodes) de toutes les cartes physiques utilisées par le deck.[7] Par exemple, le Magicien Sombre y est déclaré par l'entier constant 46986414.[7]
+Fichier d'Actions de Base : Le fichier nommé TutorialTestActions.cs hérite de la classe parente RuleBasedBotActions.[7] Dans une configuration classique, ce fichier contient les enchaînements conditionnels de cartes (par exemple, invoquer un monstre spécifique si les conditions de terrain sont requises).[7] Dans le cadre d'un bot piloté par IA, la classe est modifiée pour encapsuler un client réseau qui va intercepter l'état de jeu, le sérialiser et le transmettre à l'agent externe.[1, 5]
+Le bot doit ensuite être enregistré dans la logique globale de sélection de l'application au niveau du fichier Program.cs du projet BotTest.[7] Dans l'interface utilisateur d'YGO Omega, le développeur accède au menu Local > Host, configure le mode de bot sur AI_CUSTOM pour forcer le simulateur à céder le contrôle à l'exécutable local compilé.[7]
+Système de Communication Réseau par API
+Plutôt que d'exécuter le réseau de neurones complexe directement au sein du processus C# d'YGO Omega (ce qui engendrerait des goulots d'étranglement majeurs et des problèmes de compatibilité avec les frameworks de Deep Learning comme JAX ou TensorFlow), l'architecture repose sur un modèle client-serveur.[1, 5]
+Le projet de recherche Duelists Unite met à disposition deux wrappers de connexion critiques, DuelBotWrapper (développé en C#) et NijiAi (développé en Python), spécifiquement écrits pour l'API personnalisée d'YGO Omega.[8, 13] Ces outils interceptent les paquets de données de duel, convertissent l'état graphique du terrain en format JSON et gèrent les requêtes asynchrones vers le serveur décisionnel.[8, 13]
++------------------+                   +------------------+                   +--------------------+
+|  Client YGO      |  Envoi de l'état  |  Serveur         |  Calcul du coup   | Modèle Décisionnel |
+|  Omega (C#)      |  de jeu (JSON)    |  Inférence (Py)  |  (PPO + MCTS)     | (Fichier flax /    |
+| | ----------------> |    |                   |   FastAPI][1]|                   | [1]      |
+|                  |                   |                  |                   |                    |
+|  Réception de    |  Exécution de     |  Renvoi de       |  Sélection de     |                    |
+|  l'action à      |  l'action         |  l'action        |  l'action optimale|                    |
+|  jouer (JSON)    | <---------------- |  sélectionnée    | <---------------- |                    |
++------------------+                   +------------------+                   +--------------------+
+Lorsqu'une action est requise, le client C# envoie une requête HTTP POST contenant l'état complet au serveur Python local.[1, 5] Le serveur traite la requête, applique l'action-masking pour éliminer les choix invalides, consulte le modèle entraîné, puis renvoie une réponse JSON structurée contenant l'indice de l'action choisie.[1, 5] Le client C# reçoit ce message et l'exécute à l'aide des primitives natives d'YGO Omega, telles que BotAction(MainAction.Summon, cardId).[7]
+Pour ajuster précisément le comportement du bot lors des phases de test ou d'auto-évaluation, le système utilise des paramètres de configuration passés en arguments de lancement ou via le serveur de contrôle.[5]
+Paramètre d'Exécution
+Type
+Rôle et Impact Stratégique
+Deck
+Chaîne
+Spécifie l'exécuteur ou la configuration de l'IA à charger pour le duel.[5]
+DeckFile
+Chemin
+Indique le chemin d'accès absolu vers le fichier de deck au format standard .ydk.[5]
+RolloutCount
+Entier
+Configure le nombre de simulations parallèles à exécuter par le MCTS.[5]
+IsTraining
+Booléen
+Active des choix aléatoires d'exploration ou l'enregistrement des transitions.[5]
+ShouldUpdate
+Booléen
+Détermine si les transitions de jeu doivent être écrites en base de données SQL.[5]
+IsManual
+Booléen
+Permet à un chercheur d'injecter manuellement des actions à des fins de débogage.[5]
+TotalGames
+Entier
+Définit la limite de parties de duel à exécuter avant l'arrêt automatique du processus.[5]
+Hand
+Entier
+Détermine le choix par défaut lors du mini-jeu pierre-papier-ciseaux de début de duel (0, 1, 2).[5]
+--------------------------------------------------------------------------------
+Pipeline de Données, Entraînement et Déploiement Opérationnel
+Le cycle de vie complet du développement d'un agent de niveau expert s'articule autour de pipelines de données et d'entraînement automatisés.
+Pipeline de Données et Traitement des Decks
+L'acquisition et la mise en forme des données relatives aux cartes s'organisent de la manière suivante :
+Extraction de Données via l'API YGOPRODeck : Un script Python automatisé se connecte périodiquement à l'endpoint /cardinfo.php de l'API YGOPRODeck pour récupérer les dernières modifications de cartes, les nouvelles extensions et les règles de légalité.[10, 12] Afin de ne pas enfreindre la limite de 20 requêtes par seconde par IP, le script intègre un mécanisme d'auto-limitation (rate limiter) et de mise en cache locale permanente sur disque dur à l'aide d'un gestionnaire de clés-valeurs.[10, 12, 14]
+Parsing et Formatage du Deck par omega-api-decks : Pour soumettre un deck au système, l'application exploite l'API /convert du service omega-api-decks.[9] Ce convertisseur prend en entrée une liste brute de noms de cartes ou un fichier .ydk et génère un objet JSON structuré contenant les sections Main Deck, Extra Deck et Side Deck, ainsi que le code de deck chiffré natif accepté par YGO Omega.[9]
+Pipeline d'Entraînement de l'Intelligence Artificielle
+L'entraînement s'effectue au sein d'une infrastructure matérielle configurée selon les objectifs de performance de l'agent.
+Option A : Entraînement Local Monogpu (Démonstrateur tactique) Pour entraîner l'agent sur un archétype de deck figé contre un adversaire stationnaire, un ordinateur équipé d'une seule carte graphique (par exemple, une NVIDIA GTX 1650 ou supérieure) est suffisant.[1] Le chercheur exécute le script principal d'entraînement en spécifiant le deck cible [1] :
+Ce script lance 16 environnements parallèles en arrière-plan.[1] Toutes les 128 étapes de jeu, le modèle collecte les trajectoires de décisions, calcule les gradients de perte et ajuste la politique sous JAX.[1] La progression est évaluée régulièrement en mesurant le taux de victoire réel de l'agent contre une politique purement aléatoire ou des heuristiques déterministes.[1]
+Option B : Entraînement Distribué de Niveau Championnat (Élite) Pour atteindre des performances surhumaines capables de s'adapter aux changements constants de la méta de Yu-Gi-Oh! et de gérer des centaines de decks différents, l'entraînement doit être massivement parallélisé.[1] L'infrastructure requise implique des grappes de serveurs combinant plusieurs processeurs graphiques haut de gamme (par exemple, 8 puces NVIDIA RTX 4090 associées à des processeurs de 128 cœurs) exécutées en continu pendant plusieurs jours.[1] Ce pipeline s'appuie sur le framework Ray pour orchestrer la distribution des calculs, l'équilibrage de la charge des acteurs MCTS et l'entraînement de type "League Training" (où l'agent affronte constamment des versions antérieures de lui-même pour éliminer ses faiblesses stratégiques).[1, 15]
+Déploiement et Exécution en Production
+Une fois le modèle de décision stabilisé et validé, il est exporté sous forme de fichier de points de contrôle (checkpoint) compressé, par exemple au format TensorFlow Lite (.tflite) ou Flax (.flax_model).[1]
+Le modèle est déployé sur une instance de serveur local à l'aide d'Uvicorn et FastAPI, permettant de traiter les requêtes réseau à ultra-basse latence [1] :
+cd scripts
+export CHECKPOINT=checkpoints/agent_elite_0546_26550M.tflite
+uvicorn ygoinf.server:app --host 127.0.0.1 --port 3000 --log-config=../assets/log_conf.yaml
+Pour initier le duel autonome, l'utilisateur démarre le client graphique YGO Omega, configure un duel personnalisé, sélectionne le bot connecté en local, et exécute le projet de test C#.[7] Le wrapper C# intercepte les requêtes de décision d'YGO Omega, interroge l'endpoint HTTP du serveur Uvicorn localisé à l'adresse http://127.0.0.1:3000, reçoit la réponse décisionnelle optimisée par l'intelligence artificielle en quelques millisecondes, et transmet l'ordre physique au simulateur.[1, 7] Ce pipeline garantit une exécution fluide, stable et d'une précision tactique absolue, équivalente ou supérieure à celle des meilleurs joueurs humains.[1]
+--------------------------------------------------------------------------------
+sbl1996/ygo-agent: AI-driven Yu-Gi-Oh! bot using deep reinforcement learning and LLMs, https://github.com/sbl1996/ygo-agent
+Is DQN algorithm suitable for yugioh? : r/reinforcementlearning - Reddit, https://www.reddit.com/r/reinforcementlearning/comments/1ryy20g/is_dqn_algorithm_suitable_for_yugioh/
+Deciding winning strategies in Yu-Gi-Oh! TCG is hard - ResearchGate, https://www.researchgate.net/publication/401523370_Deciding_winning_strategies_in_Yu-Gi-Oh_TCG_is_hard
+knight00/ocgcore-KCG: ygopro script engine. - GitHub, https://github.com/knight00/ocgcore-KCG
+crispy-chiken/YugiohAi: A Yugioh Ai Learning bot - GitHub, https://github.com/crispy-chiken/YugiohAi
+sbl1996/yugioh-ai - GitHub, https://github.com/sbl1996/yugioh-ai
+Guide to Creating New Bots for YGO Omega - Projects ..., https://forum.duelistsunite.org/t/guide-to-creating-new-bots-for-ygo-omega/22573
+DuelBotWrapper - Duelists Unite - GitLab, https://gitlab.com/duelists-unite/duelbotwrapper
+ungive/omega-api-decks: Generate an image for your deck or convert it to another parsable format - GitHub, https://github.com/ungive/omega-api-decks
+YGOPRODeck — API Provider, Schemas, https://providers.apis.io/providers/yu-gi-oh/
+CSV: Visual Support for Understanding Card Synergy in Digital Collectible Card Games - SciTePress, https://www.scitepress.org/Papers/2025/132569/132569.pdf
+TimMikeladze/ygoapi: ⚔️ TypeScript client for the YGOPRODeck API, a Yu-Gi-Oh! card database. - GitHub, https://github.com/TimMikeladze/ygoapi
+Duelists Unite - GitLab, https://gitlab.com/duelists-unite
+ygoprodeck_api - Dart API docs - Pub.dev, https://pub.dev/documentation/ygoprodeck_api/latest/
+reinforcement-learning · GitHub Topics, https://github.com/topics/reinforcement-learning

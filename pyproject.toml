@@ -1,0 +1,32 @@
+[tool.poetry]
+name = "ygo-bot"
+version = "0.1.0"
+description = "Yu-Gi-Oh! AI Bot using Deep RL and LLM embeddings"
+authors = ["Kevin"]
+readme = "README.md"
+packages = [{include = "api"}, {include = "core"}, {include = "ai"}, {include = "db"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+fastapi = "^0.100.0"
+uvicorn = "^0.23.0"
+jax = "^0.4.13"
+jaxlib = "^0.4.13"
+ray = "^2.6.0"
+sqlalchemy = "^2.0.0"
+alembic = "^1.11.0"
+pandas = "^2.0.0"
+pydantic = "^2.0.0"
+
+[tool.poetry.group.dev.dependencies]
+ruff = "^0.1.0"
+pytest = "^7.4.0"
+pytest-asyncio = "^0.21.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
