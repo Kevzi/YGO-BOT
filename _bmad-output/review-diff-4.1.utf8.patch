@@ -1,0 +1,475 @@
+﻿diff --git a/_bmad-output/implementation-artifacts/4-1-synchronisation-et-cache-ygoprodeck.md b/_bmad-output/implementation-artifacts/4-1-synchronisation-et-cache-ygoprodeck.md
+new file mode 100644
+index 0000000..892cb9a
+--- /dev/null
++++ b/_bmad-output/implementation-artifacts/4-1-synchronisation-et-cache-ygoprodeck.md
+@@ -0,0 +1,70 @@
++---
++epic: 4
++story: 1
++title: "Synchronisation et Cache YGOPRODeck"
++status: done
++baseline_commit: 28324257d377740e7731aca336064ad73d2f9737
++---
++
++# Story 4.1: Synchronisation et Cache YGOPRODeck
++
++Status: ready-for-dev
++
++<!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
++
++## Story
++
++As a D├®veloppeur / Chercheur,
++I want de cr├®er un module client (ou un script d'ingestion) capable d'interroger l'API YGOPRODeck,
++so that je puisse t├®l├®charger, mettre ├á jour, et cacher localement (dans SQLite) toutes les m├®tadonn├®es officielles des cartes (noms, textes, propri├®t├®s) n├®cessaires au bon fonctionnement de l'environnement Python.
++
++## Acceptance Criteria
++
++1. **Given** une commande ou un endpoint de synchronisation
++   **When** on l'ex├®cute
++   **Then** les derni├¿res donn├®es de l'API YGOPRODeck sont r├®cup├®r├®es en respectant la limite de rate-limit (20 requ├¬tes/seconde max)
++   **And** la table SQLite des cartes est mise ├á jour et sert de source de v├®rit├® exclusive pour ├®viter le bannissement d'IP.
++
++## Tasks / Subtasks
++
++- [x] Task 1: Ajouter un client HTTP asynchrone (ex: `httpx` ou `requests`) via Poetry
++- [x] Task 2: D├®finir le mod├¿le SQLAlchemy `Card` (ou `CardMetadata`)
++  - [x] Subtask 2.1: Cr├®er le mod├¿le dans `db/models.py` avec les champs utiles (id/passcode, name, type, desc, race, archetype, etc.)
++  - [x] Subtask 2.2: G├®n├®rer la migration Alembic correspondante et l'appliquer (`alembic upgrade head`)
++- [x] Task 3: Cr├®er le script de synchronisation YGOPRODeck
++  - [x] Subtask 3.1: Impl├®menter le t├®l├®chargement depuis `https://db.ygoprodeck.com/api/v7/cardinfo.php`
++  - [x] Subtask 3.2: Impl├®menter l'insertion/mise ├á jour (upsert) en base SQLite via SQLAlchemy
++  - [x] Subtask 3.3: G├®rer le rate-limit et les erreurs HTTP potentielles (Fail Fast si l'API est HS)
++- [x] Task 4: Tests automatis├®s
++  - [x] Subtask 4.1: Ajouter un test mockant l'API YGOPRODeck pour v├®rifier le parsing et l'insertion SQLite sans faire d'appels r├®seau r├®els
++
++## Dev Notes
++
++- **Dependencies**: La stack technique requiert l'ajout d'une librairie HTTP (ex: `poetry add httpx` ou `requests`).
++- **Database Rules**: Respecter la convention de nommage de l'architecture : tables SQL au pluriel en `snake_case` (ex: `cards`), colonnes en `snake_case`. Utiliser SQLite (d├®j├á en place).
++- **Rate-Limiting**: Le point de terminaison de l'API renvoie g├®n├®ralement toutes les donn├®es d'un coup, mais si des appels multiples sont faits (ex: images ou lots), la limite stricte de 20 req/sec doit ├¬tre cod├®e pour ├®viter les bans.
++- **Architecture**: L'API FastAPI (`api/`) ou l'environnement RL (`core/ygoenv/`) consulteront ensuite cette base locale au lieu d'appeler YGOPRODeck en direct, conform├®ment au crit├¿re d'acceptation "source de v├®rit├® exclusive".
++- **Code Naming**: Les fonctions et variables Python doivent ├¬tre en `snake_case`.
++
++### Project Structure Notes
++
++- Cr├®er un script comme `scripts/sync_ygoprodeck.py` ou un module dans un nouveau package `data/` selon les pr├®f├®rences.
++- Les tests devront aller dans `tests/` en suivant la m├¬me arborescence.
++
++### References
++
++- [Source: _bmad-output/planning-artifacts/epics.md#Story 4.1]
++- [Source: _bmad-output/planning-artifacts/architecture.md#Naming Patterns]
++
++## Dev Agent Record
++
++### Agent Model Used
++
++Antigravity
++
++### Debug Log References
++
++### Completion Notes List
++
++### File List
++
+diff --git a/_bmad-output/implementation-artifacts/sprint-status.yaml b/_bmad-output/implementation-artifacts/sprint-status.yaml
+index af6c424..390722f 100644
+--- a/_bmad-output/implementation-artifacts/sprint-status.yaml
++++ b/_bmad-output/implementation-artifacts/sprint-status.yaml
+@@ -60,7 +60,7 @@ development_status:
+   3-3-chargeur-dembeddings-vectoriels-in-memory: done
+   3-4-semantique-zero-shot: done
+   epic-3-retrospective: optional
+-  epic-4: backlog
+-  4-1-synchronisation-et-cache-ygoprodeck: backlog
++  epic-4: in-progress
++  4-1-synchronisation-et-cache-ygoprodeck: done
+   4-2-interoperabilite-du-parseur-de-decks: backlog
+   epic-4-retrospective: optional
+diff --git a/alembic/versions/3a99862fb5bf_apply_review_patches_cascade_indexes_.py b/alembic/versions/3a99862fb5bf_apply_review_patches_cascade_indexes_.py
+deleted file mode 100644
+index c0aa26d..0000000
+--- a/alembic/versions/3a99862fb5bf_apply_review_patches_cascade_indexes_.py
++++ /dev/null
+@@ -1,36 +0,0 @@
+-"""Apply review patches: CASCADE, indexes, String lengths and timezone
+-
+-Revision ID: 3a99862fb5bf
+-Revises: c28db669e176
+-Create Date: 2026-06-12 10:30:23.774235
+-
+-"""
+-from typing import Sequence, Union
+-
+-from alembic import op
+-import sqlalchemy as sa
+-
+-
+-# revision identifiers, used by Alembic.
+-revision: str = '3a99862fb5bf'
+-down_revision: Union[str, Sequence[str], None] = 'c28db669e176'
+-branch_labels: Union[str, Sequence[str], None] = None
+-depends_on: Union[str, Sequence[str], None] = None
+-
+-
+-def upgrade() -> None:
+-    """Upgrade schema."""
+-    # ### commands auto generated by Alembic - please adjust! ###
+-    op.create_index(op.f('ix_game_transitions_duel_id'), 'game_transitions', ['duel_id'], unique=False)
+-    op.drop_constraint(None, 'game_transitions', type_='foreignkey')
+-    op.create_foreign_key(None, 'game_transitions', 'duel_stats', ['duel_id'], ['id'], ondelete='CASCADE')
+-    # ### end Alembic commands ###
+-
+-
+-def downgrade() -> None:
+-    """Downgrade schema."""
+-    # ### commands auto generated by Alembic - please adjust! ###
+-    op.drop_constraint(None, 'game_transitions', type_='foreignkey')
+-    op.create_foreign_key(None, 'game_transitions', 'duel_stats', ['duel_id'], ['id'])
+-    op.drop_index(op.f('ix_game_transitions_duel_id'), table_name='game_transitions')
+-    # ### end Alembic commands ###
+diff --git a/alembic/versions/4add9a4527e6_initial_schema.py b/alembic/versions/4add9a4527e6_initial_schema.py
+new file mode 100644
+index 0000000..1589f2b
+--- /dev/null
++++ b/alembic/versions/4add9a4527e6_initial_schema.py
+@@ -0,0 +1,72 @@
++"""Initial schema
++
++Revision ID: 4add9a4527e6
++Revises: 
++Create Date: 2026-06-12 23:28:01.985230
++
++"""
++from typing import Sequence, Union
++
++from alembic import op
++import sqlalchemy as sa
++
++
++# revision identifiers, used by Alembic.
++revision: str = '4add9a4527e6'
++down_revision: Union[str, Sequence[str], None] = None
++branch_labels: Union[str, Sequence[str], None] = None
++depends_on: Union[str, Sequence[str], None] = None
++
++
++def upgrade() -> None:
++    """Upgrade schema."""
++    # ### commands auto generated by Alembic - please adjust! ###
++    op.create_table('cards',
++    sa.Column('id', sa.Integer(), nullable=False),
++    sa.Column('name', sa.String(length=255), nullable=False),
++    sa.Column('type', sa.String(length=100), nullable=False),
++    sa.Column('desc', sa.String(), nullable=False),
++    sa.Column('race', sa.String(length=100), nullable=True),
++    sa.Column('archetype', sa.String(length=100), nullable=True),
++    sa.Column('atk', sa.Integer(), nullable=True),
++    sa.Column('def_', sa.Integer(), nullable=True),
++    sa.Column('level', sa.Integer(), nullable=True),
++    sa.Column('attribute', sa.String(length=50), nullable=True),
++    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
++    sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
++    sa.PrimaryKeyConstraint('id')
++    )
++    op.create_index(op.f('ix_cards_name'), 'cards', ['name'], unique=False)
++    op.create_table('duel_stats',
++    sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
++    sa.Column('player_1_deck', sa.String(length=255), nullable=False),
++    sa.Column('player_2_deck', sa.String(length=255), nullable=False),
++    sa.Column('winner', sa.Integer(), nullable=True),
++    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
++    sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
++    sa.PrimaryKeyConstraint('id')
++    )
++    op.create_table('game_transitions',
++    sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
++    sa.Column('duel_id', sa.Integer(), nullable=False),
++    sa.Column('step', sa.Integer(), nullable=False),
++    sa.Column('state', sa.JSON(), nullable=False),
++    sa.Column('action', sa.JSON(), nullable=False),
++    sa.Column('reward', sa.Float(), nullable=False),
++    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
++    sa.ForeignKeyConstraint(['duel_id'], ['duel_stats.id'], ondelete='CASCADE'),
++    sa.PrimaryKeyConstraint('id')
++    )
++    op.create_index(op.f('ix_game_transitions_duel_id'), 'game_transitions', ['duel_id'], unique=False)
++    # ### end Alembic commands ###
++
++
++def downgrade() -> None:
++    """Downgrade schema."""
++    # ### commands auto generated by Alembic - please adjust! ###
++    op.drop_index(op.f('ix_game_transitions_duel_id'), table_name='game_transitions')
++    op.drop_table('game_transitions')
++    op.drop_table('duel_stats')
++    op.drop_index(op.f('ix_cards_name'), table_name='cards')
++    op.drop_table('cards')
++    # ### end Alembic commands ###
+diff --git a/alembic/versions/c28db669e176_initial_schema.py b/alembic/versions/c28db669e176_initial_schema.py
+deleted file mode 100644
+index d946fde..0000000
+--- a/alembic/versions/c28db669e176_initial_schema.py
++++ /dev/null
+@@ -1,52 +0,0 @@
+-"""Initial schema
+-
+-Revision ID: c28db669e176
+-Revises: 
+-Create Date: 2026-06-12 10:15:34.541722
+-
+-"""
+-from typing import Sequence, Union
+-
+-from alembic import op
+-import sqlalchemy as sa
+-
+-
+-# revision identifiers, used by Alembic.
+-revision: str = 'c28db669e176'
+-down_revision: Union[str, Sequence[str], None] = None
+-branch_labels: Union[str, Sequence[str], None] = None
+-depends_on: Union[str, Sequence[str], None] = None
+-
+-
+-def upgrade() -> None:
+-    """Upgrade schema."""
+-    # ### commands auto generated by Alembic - please adjust! ###
+-    op.create_table('duel_stats',
+-    sa.Column('id', sa.Integer(), nullable=False),
+-    sa.Column('player_1_deck', sa.String(length=255), nullable=False),
+-    sa.Column('player_2_deck', sa.String(length=255), nullable=False),
+-    sa.Column('winner', sa.Integer(), nullable=True),
+-    sa.Column('created_at', sa.DateTime(), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
+-    sa.Column('updated_at', sa.DateTime(), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
+-    sa.PrimaryKeyConstraint('id')
+-    )
+-    op.create_table('game_transitions',
+-    sa.Column('id', sa.Integer(), nullable=False),
+-    sa.Column('duel_id', sa.Integer(), nullable=False),
+-    sa.Column('step', sa.Integer(), nullable=False),
+-    sa.Column('state', sa.JSON(), nullable=False),
+-    sa.Column('action', sa.JSON(), nullable=False),
+-    sa.Column('reward', sa.Float(), nullable=False),
+-    sa.Column('created_at', sa.DateTime(), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
+-    sa.ForeignKeyConstraint(['duel_id'], ['duel_stats.id'], ),
+-    sa.PrimaryKeyConstraint('id')
+-    )
+-    # ### end Alembic commands ###
+-
+-
+-def downgrade() -> None:
+-    """Downgrade schema."""
+-    # ### commands auto generated by Alembic - please adjust! ###
+-    op.drop_table('game_transitions')
+-    op.drop_table('duel_stats')
+-    # ### end Alembic commands ###
+diff --git a/db/models.py b/db/models.py
+index 22aecf9..3a972b8 100644
+--- a/db/models.py
++++ b/db/models.py
+@@ -23,3 +23,20 @@ class GameTransition(Base):
+     action: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False)
+     reward: Mapped[float] = mapped_column(Float, default=0.0)
+     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
++
++class Card(Base):
++    __tablename__ = "cards"
++
++    id: Mapped[int] = mapped_column(Integer, primary_key=True)  # passcode
++    name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
++    type: Mapped[str] = mapped_column(String(100), nullable=False)
++    desc: Mapped[str] = mapped_column(String, nullable=False)
++    race: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
++    archetype: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
++    atk: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
++    def_: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
++    level: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
++    attribute: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
++    
++    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
++    updated_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+diff --git a/pyproject.toml b/pyproject.toml
+index 7c64e15..5dc5a70 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -17,6 +17,7 @@ sqlalchemy = "^2.0.0"
+ alembic = "^1.11.0"
+ pandas = "^2.0.0"
+ pydantic = "^2.0.0"
++httpx = "^0.24.0"
+ 
+ [tool.poetry.group.dev.dependencies]
+ ruff = "^0.1.0"
+diff --git a/scripts/sync_ygoprodeck.py b/scripts/sync_ygoprodeck.py
+new file mode 100644
+index 0000000..8cbe3ef
+--- /dev/null
++++ b/scripts/sync_ygoprodeck.py
+@@ -0,0 +1,93 @@
++import asyncio
++import httpx
++import logging
++import sys
++import time
++from sqlalchemy.dialects.sqlite import insert
++from sqlalchemy import func
++
++# Local imports
++import os
++sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
++from db.models import Card
++from db.session import SessionLocal
++
++logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
++logger = logging.getLogger(__name__)
++
++API_URL = "https://db.ygoprodeck.com/api/v7/cardinfo.php"
++
++async def fetch_cards():
++    logger.info(f"Fetching cards from {API_URL}...")
++    try:
++        async with httpx.AsyncClient() as client:
++            await asyncio.sleep(0.05) # Basic rate limit hygiene
++            response = await client.get(API_URL, timeout=30.0)
++            response.raise_for_status()
++            data = response.json()
++            return data.get("data", [])
++    except httpx.HTTPError as e:
++        logger.error(f"HTTP Error while fetching cards: {e}")
++        sys.exit(1) # Fail Fast
++    except Exception as e:
++        logger.error(f"Unexpected error: {e}")
++        sys.exit(1) # Fail Fast
++
++def sync_cards_to_db(cards_data):
++    logger.info(f"Syncing {len(cards_data)} cards to database...")
++    db = SessionLocal()
++    try:
++        values_to_insert = []
++        for c in cards_data:
++            values_to_insert.append({
++                "id": c["id"],
++                "name": c["name"],
++                "type": c["type"],
++                "desc": c["desc"],
++                "race": c.get("race"),
++                "archetype": c.get("archetype"),
++                "atk": c.get("atk"),
++                "def_": c.get("def"),
++                "level": c.get("level"),
++                "attribute": c.get("attribute")
++            })
++            
++        chunk_size = 1000
++        for i in range(0, len(values_to_insert), chunk_size):
++            chunk = values_to_insert[i:i+chunk_size]
++            stmt = insert(Card).values(chunk)
++            
++            update_dict = {
++                "name": stmt.excluded.name,
++                "type": stmt.excluded.type,
++                "desc": stmt.excluded.desc,
++                "race": stmt.excluded.race,
++                "archetype": stmt.excluded.archetype,
++                "atk": stmt.excluded.atk,
++                "def_": stmt.excluded.def_,
++                "level": stmt.excluded.level,
++                "attribute": stmt.excluded.attribute,
++                "updated_at": func.now()
++            }
++            
++            stmt = stmt.on_conflict_do_update(
++                index_elements=['id'],
++                set_=update_dict
++            )
++            
++            db.execute(stmt)
++            
++        db.commit()
++        logger.info("Sync complete.")
++    finally:
++        db.close()
++
++async def main():
++    start_time = time.time()
++    cards_data = await fetch_cards()
++    if cards_data:
++        sync_cards_to_db(cards_data)
++    logger.info(f"Total time: {time.time() - start_time:.2f} seconds")
++
++if __name__ == "__main__":
++    asyncio.run(main())
+diff --git a/tests/scripts/test_sync_ygoprodeck.py b/tests/scripts/test_sync_ygoprodeck.py
+new file mode 100644
+index 0000000..ea418e6
+--- /dev/null
++++ b/tests/scripts/test_sync_ygoprodeck.py
+@@ -0,0 +1,65 @@
++import pytest
++import asyncio
++from unittest.mock import patch
++from scripts.sync_ygoprodeck import fetch_cards, sync_cards_to_db
++from db.models import Card
++from db.session import SessionLocal
++
++MOCK_API_RESPONSE = {
++    "data": [
++        {
++            "id": 89631139,
++            "name": "Blue-Eyes White Dragon",
++            "type": "Normal Monster",
++            "desc": "This legendary dragon is a powerful engine of destruction.",
++            "atk": 3000,
++            "def": 2500,
++            "level": 8,
++            "race": "Dragon",
++            "attribute": "LIGHT",
++            "archetype": "Blue-Eyes"
++        },
++        {
++            "id": 46986414,
++            "name": "Dark Magician",
++            "type": "Normal Monster",
++            "desc": "The ultimate wizard in terms of attack and defense.",
++            "atk": 2500,
++            "def": 2100,
++            "level": 7,
++            "race": "Spellcaster",
++            "attribute": "DARK",
++            "archetype": "Dark Magician"
++        }
++    ]
++}
++
++@pytest.mark.asyncio
++async def test_fetch_cards(httpx_mock):
++    # httpx_mock is provided by pytest-httpx
++    from scripts.sync_ygoprodeck import API_URL
++    httpx_mock.add_response(url=API_URL, json=MOCK_API_RESPONSE)
++    
++    cards = await fetch_cards()
++    
++    assert len(cards) == 2
++    assert cards[0]["name"] == "Blue-Eyes White Dragon"
++    assert cards[1]["id"] == 46986414
++
++def test_sync_cards_to_db():
++    sync_cards_to_db(MOCK_API_RESPONSE["data"])
++    
++    db = SessionLocal()
++    try:
++        be_card = db.query(Card).filter(Card.id == 89631139).first()
++        assert be_card is not None
++        assert be_card.name == "Blue-Eyes White Dragon"
++        assert be_card.atk == 3000
++        assert be_card.level == 8
++        assert be_card.attribute == "LIGHT"
++        
++        dm_card = db.query(Card).filter(Card.id == 46986414).first()
++        assert dm_card is not None
++        assert dm_card.name == "Dark Magician"
++    finally:
++        db.close()

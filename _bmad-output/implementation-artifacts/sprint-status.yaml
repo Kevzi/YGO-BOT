@@ -60,7 +60,7 @@ development_status:
   3-3-chargeur-dembeddings-vectoriels-in-memory: done
   3-4-semantique-zero-shot: done
   epic-3-retrospective: optional
-  epic-4: backlog
-  4-1-synchronisation-et-cache-ygoprodeck: backlog
+  epic-4: in-progress
+  4-1-synchronisation-et-cache-ygoprodeck: done
   4-2-interoperabilite-du-parseur-de-decks: backlog
   epic-4-retrospective: optional

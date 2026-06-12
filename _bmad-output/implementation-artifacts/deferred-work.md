@@ -76,3 +76,7 @@
 - Absence d'Action Masking [ai/ppo.py]
 - Hyperparamètres codés en dur [distributed/worker.py]
 - Stub Fake pour la base de données [distributed/train.py]
+
+## Deferred from: code review of 4-1-synchronisation-et-cache-ygoprodeck (2026-06-12)
+- [ ] Hard SQLite Dialect Lock-in (architecture specifies SQLite for now)
+- [ ] Missing Indexing Strategy (atk, def, etc.)

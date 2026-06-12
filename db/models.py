@@ -23,3 +23,20 @@ class GameTransition(Base):
     action: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False)
     reward: Mapped[float] = mapped_column(Float, default=0.0)
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+class Card(Base):
+    __tablename__ = "cards"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)  # passcode
+    name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    type: Mapped[str] = mapped_column(String(100), nullable=False)
+    desc: Mapped[str] = mapped_column(String, nullable=False)
+    race: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    archetype: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    atk: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    def_: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    level: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    attribute: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
