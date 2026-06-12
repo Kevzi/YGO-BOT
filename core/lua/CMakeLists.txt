@@ -1,0 +1,5 @@
+project(lua CXX)
+file(GLOB LUA_SRC "*.c")
+list(REMOVE_ITEM LUA_SRC "${CMAKE_CURRENT_SOURCE_DIR}/lua.c" "${CMAKE_CURRENT_SOURCE_DIR}/luac.c")
+set_source_files_properties(${LUA_SRC} PROPERTIES LANGUAGE CXX)
+add_library(lua STATIC ${LUA_SRC})
