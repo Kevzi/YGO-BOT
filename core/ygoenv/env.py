@@ -26,16 +26,21 @@ class YgoEnv(gym.Env):
         self.engine = YgoEngine()
         self._current_state = None
         
-    def _get_observation(self) -> np.ndarray:
+    def _get_observation(self, mock_card_ids: np.ndarray = None) -> np.ndarray:
         # TODO: Appeler l'engine pour extraire les identifiants réels des cartes sur le terrain
         # Pour le MVP, on simule une liste de cartes. La plupart sont vides (0, donc inconnues).
         from ai.embeddings import embed_loader
         
-        card_ids = np.zeros(self.NUM_CARDS, dtype=np.int32)
-        # card_ids[0] = 89631139 # Simulation d'une carte présente si nécessaire
+        card_ids = mock_card_ids if mock_card_ids is not None else np.zeros(self.NUM_CARDS, dtype=np.int32)
         
         if not embed_loader.is_loaded():
+            import logging
+            logging.warning("Embedding loader non chargé ! Appel implicite à load() ou retour de zéros si mock.")
+            # Fallback en silence uniquement parce qu'on est en dev/test. Dans un vrai moteur : embed_loader.load()
             return np.zeros(self.observation_space.shape, dtype=np.float32)
+            
+        if embed_loader._embedding_dim != self.embedding_dim:
+            raise ValueError(f"Shape Mismatch Lazy-Loading: YgoEnv initialisé avec {self.embedding_dim} mais embed_loader a {embed_loader._embedding_dim}.")
             
         vectors = embed_loader.get_embeddings_batch(card_ids)
         return np.asarray(vectors, dtype=np.float32).flatten()

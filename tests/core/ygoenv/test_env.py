@@ -7,6 +7,8 @@ def test_ygoenv_initialization():
     env = YgoEnv()
     assert isinstance(env.action_space, gym.spaces.Discrete)
     # The observation space for now will be a flat array (e.g. 100 features)
+    # Observation space (Box): Un vecteur plat représentant le terrain vectorisé.
+    # Action space (Discrete): Par exemple 200 actions possibles.
     assert isinstance(env.observation_space, gym.spaces.Box)
     assert env.observation_space.dtype == np.float32
     
@@ -65,10 +67,10 @@ def test_ygoenv_zero_shot():
         with open(embed_path, "wb") as f:
             pickle.dump(dummy_data, f)
             
-        embed_loader.filepath = embed_path
-        embed_loader.load()
-        
         try:
+            embed_loader.filepath = embed_path
+            embed_loader.load()
+            
             env = YgoEnv()
             obs, info = env.reset()
             
@@ -76,12 +78,11 @@ def test_ygoenv_zero_shot():
             assert obs.shape == (env.NUM_CARDS * embed_loader._embedding_dim,)
             
             # Simulate unknown card ID by replacing one ID with 999999999
-            # Since _get_observation currently simulates zeros for IDs,
-            # we directly call the batch with an unknown ID
+            # Since _get_observation currently simulates zeros for IDs in MVP,
+            # we pass our mock card_ids directly to _get_observation
             card_ids = np.zeros(env.NUM_CARDS, dtype=np.int32)
             card_ids[0] = 999999999
-            vectors = embed_loader.get_embeddings_batch(card_ids)
-            obs_unknown = np.asarray(vectors).flatten()
+            obs_unknown = env._get_observation(mock_card_ids=card_ids)
             
             assert obs_unknown.shape == obs.shape
             # Ensure the unknown card resulted in zeros

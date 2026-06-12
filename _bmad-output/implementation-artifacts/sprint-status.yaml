@@ -58,7 +58,7 @@ development_status:
   3-1-memoire-a-courtlong-terme: done
   3-2-planification-arborescente: done
   3-3-chargeur-dembeddings-vectoriels-in-memory: done
-  3-4-semantique-zero-shot: review
+  3-4-semantique-zero-shot: done
   epic-3-retrospective: optional
   epic-4: backlog
   4-1-synchronisation-et-cache-ygoprodeck: backlog

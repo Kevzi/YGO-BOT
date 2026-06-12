@@ -2,13 +2,13 @@
 epic: 3
 story: 4
 title: Sémantique "Zero-Shot" (Modèle Hybride)
-status: in-progress
+status: done
 baseline_commit: 142644830760e1541b0b8ff531389426e9805b97
 ---
 
 # Story 3.4: Sémantique "Zero-Shot" (Modèle Hybride)
 
-Status: ready-for-dev
+Status: done
 
 ## Story
 
@@ -61,3 +61,17 @@ So that l'agent puisse transférer sa connaissance des effets de cartes validée
 
 ### Completion Notes
 *(Will be populated by dev agent)*
+
+### Review Findings
+- [x] [Review][Patch] Inconsistent Documentation vs Reality [`tests/core/ygoenv/test_env.py`]
+- [x] [Review][Patch] Silent failure when embedding loader is not initialized [`core/ygoenv/env.py`]
+- [x] [Review][Patch] Observation Shape Mismatch Risk on Lazy Loading [`core/ygoenv/env.py`]
+- [x] [Review][Patch] Zero-Shot Unit Test bypasses Environment Observation Logic [`tests/core/ygoenv/test_env.py`]
+- [x] [Review][Patch] `embed_loader.load()` unhandled exception skips finally block [`tests/core/ygoenv/test_env.py`]
+- [x] [Review][Patch] Redundant `ray.get(future)` call [`tests/distributed/test_ray_pipeline.py`]
+- [x] [Review][Defer] Brittle Hardcoded Actions [`tests/core/ygoenv/test_env.py`] — deferred, pre-existing
+- [x] [Review][Defer] Encapsulation Violation - State [`tests/core/ygoenv/test_env.py`] — deferred, pre-existing
+- [x] [Review][Defer] Coupling of DB Contexts [`tests/distributed/test_ray_pipeline.py`] — deferred, pre-existing test environment constraint
+- [x] [Review][Defer] Degraded Test Strictness [`tests/test_engine.py`] — deferred, pre-existing mock constraints
+- [x] [Review][Defer] Language Inconsistency — deferred, not a blocker for this story
+- [x] [Review][Defer] Test is executed without a mock database fixture injected [`tests/distributed/test_ray_pipeline.py`] — deferred, pre-existing

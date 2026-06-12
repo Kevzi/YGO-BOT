@@ -24,13 +24,10 @@ def test_database_actor_insertion(ray_init):
     # Appel asynchrone (retourne un ObjectRef)
     future = db_actor.record_duel_stats.remote(stats)
     
-    # Attente de la fin de l'exécution
-    ray.get(future)
-    
-    # Assert
-    # Vérifier que l'insertion a bien eu lieu
+    # Attente de la fin de l'exécution et vérification
     # Pour ce test on vérifie que l'acteur retourne True et que la DB est modifiée
-    assert ray.get(future) is True
+    result = ray.get(future)
+    assert result is True
     
     from db.session import SessionLocal
     from db.models import DuelStats

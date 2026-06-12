@@ -47,6 +47,14 @@
 - Duplicated Mock Definitions: `MockEnv` is identical in test files (refactoring opportunity).
 - Mélange de paradigmes OOP et fonctionnel [ai/ppo.py] — deferred, pre-existing (choix structurel provisoire)
 
+## Deferred from: code review of 3-4-semantique-zero-shot.md (2026-06-12)
+- Brittle Hardcoded Actions [`tests/core/ygoenv/test_env.py`]
+- Encapsulation Violation - State [`tests/core/ygoenv/test_env.py`]
+- Coupling of DB Contexts [`tests/distributed/test_ray_pipeline.py`]
+- Degraded Test Strictness [`tests/test_engine.py`]
+- Language Inconsistency
+- Test is executed without a mock database fixture injected [`tests/distributed/test_ray_pipeline.py`]
+
 ## Deferred from: code review of 2-1-environnement-rl-standardise (2026-06-12)
 - Hardcoded Action/Observation Space Dimension: Hardcoded dimensions (200, 100) are deferred as this is an MVP mock.
 - Useless Output/Zeros Observation/Simplistic reset: Reward 0, terminated False, phase DRAW are MVP mocks and deferred.
