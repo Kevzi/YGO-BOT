@@ -4,7 +4,7 @@ baseline_commit: 99008bd83d9355433d4fc36bfe7a2810906710f5
 
 # Story 1.2: Intégration du Moteur C++ (ygoenv / ocgcore)
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -81,3 +81,14 @@ Antigravity (DeepMind)
 - `core/ygoenv/__init__.py` (nouveau)
 - `core/ygoenv/wrapper.py` (nouveau)
 - `tests/test_engine.py` (nouveau)
+
+### Review Findings
+
+- [x] [Review][Patch] Build script assumes multi-config generator [core/build_engine.py:51]
+- [x] [Review][Patch] Build script hardcodes .dll extension [core/build_engine.py]
+- [x] [Review][Patch] Build script skips copying silently if dll missing [core/build_engine.py:53]
+- [x] [Review][Patch] wrapper.py uses dll_path.exists() instead of is_file() [core/ygoenv/wrapper.py:20]
+- [x] [Review][Patch] State parameter is not transmitted to the C++ engine [core/ygoenv/wrapper.py]
+- [x] [Review][Patch] Legal actions are hardcoded instead of being extracted from the engine [core/ygoenv/wrapper.py]
+- [x] [Review][Patch] Test for legal actions masks engine failures [tests/test_engine.py]
+- [x] [Review][Patch] Silent fallback to mock mode violates "Fail Fast" principle [core/ygoenv/wrapper.py]

@@ -1,0 +1,289 @@
+﻿diff --git a/distributed/__init__.py b/distributed/__init__.py
+new file mode 100644
+index 0000000..0e679fc
+--- /dev/null
++++ b/distributed/__init__.py
+@@ -0,0 +1 @@
++"""Distributed training module using Ray."""
+diff --git a/distributed/db_actor.py b/distributed/db_actor.py
+new file mode 100644
+index 0000000..ca1be72
+--- /dev/null
++++ b/distributed/db_actor.py
+@@ -0,0 +1,33 @@
++import ray
++from db.session import get_db
++from db.models import DuelStats
++
++@ray.remote
++class DatabaseActor:
++    def __init__(self):
++        # Initialisation (pourrait pr├®charger la session DB)
++        pass
++
++    def record_duel_stats(self, stats_dict: dict) -> bool:
++        """
++        Enregistre les stats d'un duel de mani├¿re s├®quentielle pour ├®viter
++        les erreurs 'database is locked' de SQLite.
++        """
++        try:
++            db_generator = get_db()
++            db = next(db_generator)
++            
++            # Simple insertion
++            duel_stat = DuelStats(**stats_dict)
++            db.add(duel_stat)
++            db.commit()
++            return True
++        except Exception as e:
++            print(f"Erreur d'insertion DB: {e}")
++            return False
++        finally:
++            # On s'assure de fermer la session
++            try:
++                next(db_generator)
++            except StopIteration:
++                pass
+diff --git a/distributed/worker.py b/distributed/worker.py
+new file mode 100644
+index 0000000..823ad59
+--- /dev/null
++++ b/distributed/worker.py
+@@ -0,0 +1,85 @@
++import ray
++import numpy as np
++import jax.numpy as jnp
++from core.ygoenv.env import YgoEnv
++from ai.ppo import PPOAgent
++
++@ray.remote
++class RolloutWorker:
++    def __init__(self, obs_dim: int = 100, act_dim: int = 200, hidden_dim: int = 64):
++        # Initialise l'environnement ├á l'int├®rieur de l'acteur (CPU/Thread local)
++        self.env = YgoEnv()
++        self.agent = PPOAgent(obs_dim=obs_dim, act_dim=act_dim, hidden_dim=hidden_dim)
++
++    def collect_rollout(self, params: dict, num_steps: int = 100) -> dict:
++        """
++        Joue 'num_steps' ├®tapes dans l'environnement en utilisant les poids (params) du Learner.
++        Retourne la trajectoire (batch).
++        """
++        obs_list = []
++        actions_list = []
++        rewards_list = []
++        log_probs_list = []
++        values_list = []
++
++        obs, _ = self.env.reset()
++
++        # Si params est vide (pour le test mock par exemple), on init dummy params
++        import jax
++        if not params:
++            rng = jax.random.PRNGKey(0)
++            params = self.agent.init_params(rng)
++
++        for _ in range(num_steps):
++            obs_jax = jnp.array(obs)
++            
++            # Forward pass (Policy et Value)
++            probs, value = self.agent.forward(params, obs_jax)
++            
++            # ├ëchantillonnage de l'action selon les probabilit├®s
++            probs_np = np.array(probs)
++            # Si le mod├¿le retourne un batch de taille 1, on extrait le vecteur
++            if probs_np.ndim == 2 and probs_np.shape[0] == 1:
++                probs_np = probs_np[0]
++            # S├®curit├® (NaN)
++            if np.isnan(probs_np).any():
++                probs_np = np.ones_like(probs_np) / len(probs_np)
++                
++            action = np.random.choice(len(probs_np), p=probs_np)
++            
++            # Enregistrement pour l'apprentissage
++            obs_list.append(obs)
++            actions_list.append(action)
++            
++            # log_prob approxim├® (pour PPO old_log_probs)
++            log_prob = np.log(probs_np[action] + 1e-8)
++            log_probs_list.append(log_prob)
++            values_list.append(float(np.squeeze(value)))
++
++            # Step dans l'environnement
++            next_obs, reward, terminated, truncated, info = self.env.step(action)
++            rewards_list.append(reward)
++
++            if terminated or truncated:
++                obs, _ = self.env.reset()
++            else:
++                obs = next_obs
++
++        # Calcul basique de 'returns' et 'advantages' pour le mock (on laisse le Learner faire le calcul pr├®cis avec GAE normalement, 
++        # mais ici on simplifie pour retourner un dict complet)
++        rewards_np = np.array(rewards_list, dtype=np.float32)
++        values_np = np.array(values_list, dtype=np.float32)
++        
++        # Un returns mock├® simple : R_t = r_t + gamma * V_{t+1} (gamma=0.99)
++        returns_np = rewards_np + 0.99 * np.append(values_np[1:], 0.0)
++        advantages_np = returns_np - values_np
++
++        return {
++            "obs": np.array(obs_list, dtype=np.float32),
++            "actions": np.array(actions_list, dtype=np.int32),
++            "rewards": rewards_np,
++            "old_log_probs": np.array(log_probs_list, dtype=np.float32),
++            "values": values_np,
++            "returns": returns_np,
++            "advantages": advantages_np
++        }
+diff --git a/distributed/train.py b/distributed/train.py
+new file mode 100644
+index 0000000..93083b5
+--- /dev/null
++++ b/distributed/train.py
+@@ -0,0 +1,73 @@
++import time
++import ray
++import jax
++import jax.numpy as jnp
++import numpy as np
++
++from distributed.worker import RolloutWorker
++from distributed.db_actor import DatabaseActor
++from ai.ppo import PPOAgent
++
++class LeagueTrainer:
++    def __init__(self, num_workers: int = 2, obs_dim: int = 100, act_dim: int = 200, hidden_dim: int = 64):
++        self.num_workers = num_workers
++        self.obs_dim = obs_dim
++        self.act_dim = act_dim
++        self.hidden_dim = hidden_dim
++        
++        # Initialisation du Learner global
++        self.agent = PPOAgent(obs_dim=obs_dim, act_dim=act_dim, hidden_dim=hidden_dim)
++        rng = jax.random.PRNGKey(42)
++        self.params = self.agent.init_params(rng)
++        
++        # Acteurs Ray
++        self.workers = [RolloutWorker.remote(obs_dim=obs_dim, act_dim=act_dim, hidden_dim=hidden_dim) for _ in range(num_workers)]
++        self.db_actor = DatabaseActor.remote()
++
++    def train_step(self, num_steps: int = 100):
++        """Effectue une it├®ration de collecte et d'apprentissage."""
++        # 1. Demande de collecte (Asynchrone)
++        futures = [w.collect_rollout.remote(self.params, num_steps=num_steps) for w in self.workers]
++        
++        # 2. Attente des r├®sultats
++        trajectories = ray.get(futures)
++        
++        # 3. Concat├®nation des batchs
++        all_obs = np.concatenate([t["obs"] for t in trajectories], axis=0)
++        all_actions = np.concatenate([t["actions"] for t in trajectories], axis=0)
++        all_old_log_probs = np.concatenate([t["old_log_probs"] for t in trajectories], axis=0)
++        all_advantages = np.concatenate([t["advantages"] for t in trajectories], axis=0)
++        all_returns = np.concatenate([t["returns"] for t in trajectories], axis=0)
++        
++        # Conversion JAX
++        j_obs = jnp.array(all_obs)
++        j_actions = jnp.array(all_actions)
++        j_old_log_probs = jnp.array(all_old_log_probs)
++        j_advantages = jnp.array(all_advantages)
++        j_returns = jnp.array(all_returns)
++        
++        # 4. Mise ├á jour PPO
++        self.params, metrics = self.agent.update_params(
++            self.params, j_obs, j_actions, j_old_log_probs, j_advantages, j_returns
++        )
++        
++        # 5. Enregistrement asynchrone DB (Simulation de fin de duel)
++        self.db_actor.record_duel_stats.remote({
++            "player_1_deck": "PPO_League",
++            "player_2_deck": "PPO_League_Selfplay",
++            "winner": 1
++        })
++        
++        metrics["episodes_collected"] = len(trajectories)
++        return metrics
++
++if __name__ == "__main__":
++    ray.init(ignore_reinit_error=True)
++    trainer = LeagueTrainer(num_workers=4)
++    print("D├®marrage de l'entra├«nement distribu├®...")
++    for i in range(10):
++        t0 = time.time()
++        metrics = trainer.train_step(num_steps=100)
++        dt = time.time() - t0
++        print(f"Iteration {i+1} - Loss: {metrics['total_loss']:.4f} - Policy Loss: {metrics['policy_loss']:.4f} - Time: {dt:.2f}s")
++    print("Entra├«nement termin├®.")
+diff --git a/tests/distributed/test_ray_pipeline.py b/tests/distributed/test_ray_pipeline.py
+new file mode 100644
+index 0000000..29dbca0
+--- /dev/null
++++ b/tests/distributed/test_ray_pipeline.py
+@@ -0,0 +1,67 @@
++import pytest
++import ray
++from distributed.db_actor import DatabaseActor
++from db.session import get_db
++from sqlalchemy import text
++
++@pytest.fixture(scope="module")
++def ray_init():
++    ray.init(ignore_reinit_error=True)
++    yield
++    ray.shutdown()
++
++def test_database_actor_insertion(ray_init):
++    # Act
++    db_actor = DatabaseActor.remote()
++    
++    # Nous simulons un enregistrement de stats
++    stats = {
++        "player_1_deck": "Dummy",
++        "player_2_deck": "Dummy",
++        "winner": 1
++    }
++    
++    # Appel asynchrone (retourne un ObjectRef)
++    future = db_actor.record_duel_stats.remote(stats)
++    
++    # Attente de la fin de l'ex├®cution
++    ray.get(future)
++    
++    # Assert
++    # V├®rifier que l'insertion a bien eu lieu
++    # Pour ce test on v├®rifie simplement que l'acteur retourne True ou ne plante pas
++    # Mais dans l'id├®al on lit la DB. Faisons simple d'abord.
++    assert ray.get(future) is True
++
++def test_rollout_worker(ray_init):
++    from distributed.worker import RolloutWorker
++    import jax.numpy as jnp
++    
++    worker = RolloutWorker.remote()
++    
++    # Fake params (empty dict for now since PPOAgent init_params does that, or actual params)
++    # On va simuler un params bidon, le PPOAgent est mock├® ou utilise des vrais params
++    fake_params = {} 
++    
++    future = worker.collect_rollout.remote(fake_params, num_steps=5)
++    trajectory = ray.get(future)
++    
++    assert "obs" in trajectory
++    assert "actions" in trajectory
++    assert "rewards" in trajectory
++    assert len(trajectory["obs"]) > 0
++
++def test_distributed_training_loop(ray_init):
++    from distributed.train import LeagueTrainer
++    import jax
++    import jax.numpy as jnp
++    
++    # We test a 1-step training loop with 1 worker
++    trainer = LeagueTrainer(num_workers=1, obs_dim=100, act_dim=200, hidden_dim=64)
++    
++    # Run 1 iteration
++    metrics = trainer.train_step(num_steps=5)
++    
++    assert "total_loss" in metrics
++    assert "policy_loss" in metrics
++    assert metrics["episodes_collected"] == 1

@@ -21,14 +21,11 @@ def test_engine_legal_actions():
     mock_state = {"duel_id": 1, "step": 0, "player": 0}
     
     # On s'attend à ce que le moteur retourne une liste d'actions ou lève une erreur si c'est invalide.
-    # Puisque nous envoyons un état bidon, il est très probable que le moteur nous renvoie une erreur.
-    try:
-        actions = engine.get_legal_actions(mock_state)
-        assert isinstance(actions, list)
-    except EngineCrashError:
-        # C'est aussi un comportement acceptable si l'état mocké provoque un crash du moteur,
-        # l'important c'est que l'exception EngineCrashError soit levée (Fail Fast).
-        pass
+    # On a implémenté un système Fail Fast, donc si le state est None ça plante, mais avec un dict,
+    # le système l'accepte et renvoie les actions.
+    actions = engine.get_legal_actions(mock_state)
+    assert isinstance(actions, list)
+    assert len(actions) > 0
 
 def test_engine_fail_fast_exception():
     """Test spécifique pour valider le Fail Fast : un état corrompu doit lever EngineCrashError."""

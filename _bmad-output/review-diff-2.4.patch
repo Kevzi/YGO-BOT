@@ -1,0 +1,90 @@
+﻿diff --git a/cluster/ray_tpu_config.yaml b/cluster/ray_tpu_config.yaml
+index e69de29..2de8407 100644
+--- a/cluster/ray_tpu_config.yaml
++++ b/cluster/ray_tpu_config.yaml
+@@ -0,0 +1,85 @@
++# Configuration Ray Cluster pour YGO-BOT (Google TRC / TPU)
++cluster_name: ygo-bot-ray-cluster
++
++# Limites d'autoscaling
++max_workers: 2
++upscaling_speed: 1.0
++idle_timeout_minutes: 5
++
++# Configuration du Cloud Provider (GCP pour TRC)
++provider:
++  type: gcp
++  region: us-central1
++  availability_zone: us-central1-a
++  project_id: null # ├Ç REMPLACER: project_id GCP
++
++# Authentification SSH
++auth:
++  ssh_user: ubuntu
++
++# Mod├¿les de noeuds (Head et Workers)
++available_node_types:
++  head_node:
++    resources: {"CPU": 4}
++    node_config:
++      machineType: n1-standard-4
++      disks:
++        - boot: true
++          autoDelete: true
++          type: PERSISTENT
++          initializeParams:
++            diskSizeGb: 50
++            sourceImage: projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts
++  
++  worker_node_tpu:
++    min_workers: 0
++    max_workers: 2
++    resources: {"CPU": 4, "TPU": 1}
++    node_config:
++      machineType: n1-standard-4
++      # Section ├á ajuster avec l'acceleratorType (ex: v2-8, v3-8) selon l'allocation TRC
++      # guestAccelerators:
++      #   - acceleratorType: zones/us-central1-a/acceleratorTypes/v2-8
++      #     acceleratorCount: 1
++
++head_node_type: head_node
++
++# Synchronisation des fichiers (Placeholder)
++# file_mounts: {
++#   "/home/ubuntu/ygo-bot": "."
++# }
++# cluster_synced_files: []
++# file_mounts_sync_continuously: False
++
++# Commandes d'initialisation de l'OS (Avant configuration Python)
++initialization_commands:
++  - sudo apt-get update
++  - sudo apt-get install -y python3.11 python3.11-venv python3.11-dev git curl
++
++# Commandes de configuration de l'environnement (Python & D├®pendances)
++setup_commands:
++  # 1. Installation de Poetry
++  - curl -sSL https://install.python-poetry.org | python3.11 -
++  - echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
++  
++  # 2. Cloner le repo ou configurer l'espace de travail (Placeholder si file_mounts n'est pas utilis├®)
++  # - git clone https://github.com/votre-repo/ygo-bot.git
++  
++  # 3. Installation des d├®pendances du projet
++  # - cd ygo-bot && ~/.local/bin/poetry env use python3.11 && ~/.local/bin/poetry install
++  
++  # 4. Assurer que JAX utilise le bon backend (CPU pour les workers normaux si n├®cessaire, TPU sinon)
++  - echo "Environnement YGO-BOT configur├® avec succ├¿s"
++
++head_setup_commands: []
++worker_setup_commands: []
++
++# D├®marrage de Ray sur le noeud Head
++head_start_ray_commands:
++  - ray stop
++  - ray start --head --port=6379 --object-manager-port=8076 --autoscaling-config=~/ray_bootstrap_config.yaml
++
++# D├®marrage de Ray sur les noeuds Workers
++worker_start_ray_commands:
++  - ray stop
++  - ray start --address=$RAY_HEAD_IP:6379

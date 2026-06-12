@@ -1,4 +1,5 @@
 import os
+import sys
 import shutil
 import subprocess
 import urllib.request
@@ -84,10 +85,23 @@ def build_engine():
     subprocess.run(["cmake", "--build", ".", "--config", "Release"], cwd=BUILD_DIR, check=True)
     
     # Copy dll to core directory for easy ctypes loading
-    dll_path = BUILD_DIR / "ocgcore" / "Release" / "ocgcore.dll"
-    if dll_path.exists():
-        shutil.copy(dll_path, CORE_DIR / "ocgcore.dll")
-        print("ocgcore.dll copied to core directory.")
+    if sys.platform.startswith("win"):
+        ext = ".dll"
+        possible_paths = [BUILD_DIR / "ocgcore" / "Release" / f"ocgcore{ext}", BUILD_DIR / "ocgcore" / f"ocgcore{ext}"]
+    elif sys.platform.startswith("darwin"):
+        ext = ".dylib"
+        possible_paths = [BUILD_DIR / "ocgcore" / f"libocgcore{ext}", BUILD_DIR / "ocgcore" / "Release" / f"libocgcore{ext}"]
+    else:
+        ext = ".so"
+        possible_paths = [BUILD_DIR / "ocgcore" / f"libocgcore{ext}", BUILD_DIR / "ocgcore" / "Release" / f"libocgcore{ext}"]
+    
+    dll_path = next((p for p in possible_paths if p.exists()), None)
+    
+    if dll_path:
+        shutil.copy(dll_path, CORE_DIR / f"ocgcore{ext}")
+        print(f"Engine library copied to core directory: {dll_path.name}")
+    else:
+        raise FileNotFoundError(f"Failed to find the compiled engine library (expected extension {ext}).")
     
     print("Build successful!")
 

@@ -1,0 +1,396 @@
+﻿diff --git a/ai/ppo.py b/ai/ppo.py
+new file mode 100644
+index 0000000..875fa78
+--- /dev/null
++++ b/ai/ppo.py
+@@ -0,0 +1,190 @@
++import jax
++import jax.numpy as jnp
++
++class PPOAgent:
++    def __init__(self, obs_dim: int, act_dim: int, hidden_dim: int = 64):
++        assert obs_dim > 0 and act_dim > 0 and hidden_dim > 0, "Dimensions must be strictly positive"
++        self.obs_dim = obs_dim
++        self.act_dim = act_dim
++        self.hidden_dim = hidden_dim
++        
++    def init_hidden_state(self, batch_size: int) -> tuple[jnp.ndarray, jnp.ndarray]:
++        """Initialise l'├®tat cach├® (h, c) pour un batch de s├®quences."""
++        return (jnp.zeros((batch_size, self.hidden_dim), dtype=jnp.float32), 
++                jnp.zeros((batch_size, self.hidden_dim), dtype=jnp.float32))
++
++    def init_params(self, rng: jax.random.PRNGKey) -> dict:
++        """Initialise les poids du r├®seau de neurones en JAX pur."""
++        keys = jax.random.split(rng, 5)
++        
++        glorot_init = jax.nn.initializers.glorot_uniform()
++        zeros_init = jax.nn.initializers.zeros
++        
++        # Feature Extractor (shared MLP before LSTM)
++        w1_f = glorot_init(keys[0], (self.obs_dim, self.hidden_dim), dtype=jnp.float32)
++        b1_f = zeros_init(keys[1], (self.hidden_dim,), dtype=jnp.float32)
++        
++        # LSTM layer (takes feature + h_prev -> 4 * hidden_dim)
++        lstm_w_i = glorot_init(keys[2], (self.hidden_dim, 4 * self.hidden_dim), dtype=jnp.float32)
++        lstm_w_h = glorot_init(keys[3], (self.hidden_dim, 4 * self.hidden_dim), dtype=jnp.float32)
++        lstm_b = zeros_init(keys[4], (4 * self.hidden_dim,), dtype=jnp.float32)
++
++        # Split keys for policy and value heads
++        keys_heads = jax.random.split(keys[0], 4)
++        
++        # Policy Head
++        w_p = glorot_init(keys_heads[0], (self.hidden_dim, self.act_dim), dtype=jnp.float32)
++        b_p = zeros_init(keys_heads[1], (self.act_dim,), dtype=jnp.float32)
++        
++        # Value Head
++        w_v = glorot_init(keys_heads[2], (self.hidden_dim, 1), dtype=jnp.float32)
++        b_v = zeros_init(keys_heads[3], (1,), dtype=jnp.float32)
++        
++        return {
++            "feature": {"w": w1_f, "b": b1_f},
++            "lstm": {"w_i": lstm_w_i, "w_h": lstm_w_h, "b": lstm_b},
++            "policy": {"w": w_p, "b": b_p},
++            "value": {"w": w_v, "b": b_v}
++        }
++
++    def _lstm_step(self, params: dict, hidden_state: tuple[jnp.ndarray, jnp.ndarray], x: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
++        """Ex├®cute une ├®tape LSTM. x: (batch, hidden_dim), hidden_state: (h, c)."""
++        h, c = hidden_state
++        
++        lstm_params = params["lstm"]
++        # W_i * x + W_h * h + b
++        gates = jnp.dot(x, lstm_params["w_i"]) + jnp.dot(h, lstm_params["w_h"]) + lstm_params["b"]
++        
++        # i, f, g, o
++        i, f, g, o = jnp.split(gates, 4, axis=-1)
++        
++        i = jax.nn.sigmoid(i)
++        f = jax.nn.sigmoid(f)
++        g = jax.nn.tanh(g)
++        o = jax.nn.sigmoid(o)
++        
++        c_new = f * c + i * g
++        h_new = o * jax.nn.tanh(c_new)
++        
++        return h_new, c_new
++
++    def forward(self, params: dict, hidden_state: tuple[jnp.ndarray, jnp.ndarray], obs: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray, tuple[jnp.ndarray, jnp.ndarray]]:
++        """Forward pass public pour l'inf├®rence. Retourne les probabilit├®s, la Value et le nouvel ├®tat cach├®."""
++        if obs.ndim == 1:
++            obs = jnp.expand_dims(obs, axis=0)
++            
++        # Extract features
++        x = jnp.maximum(0, jnp.dot(obs, params["feature"]["w"]) + params["feature"]["b"])
++        
++        # LSTM Step
++        next_hidden_state = self._lstm_step(params, hidden_state, x)
++        h_new, _ = next_hidden_state
++        
++        # Policy & Value heads
++        logits = jnp.dot(h_new, params["policy"]["w"]) + params["policy"]["b"]
++        probs = jax.nn.softmax(logits, axis=-1)
++        
++        value = jnp.dot(h_new, params["value"]["w"]) + params["value"]["b"]
++        
++        return probs, value[..., 0], next_hidden_state
++
++    def _forward_sequence(self, params: dict, obs_seq: jnp.ndarray, dones_seq: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
++        """Calcul de la s├®quence compl├¿te pour BPTT via jax.lax.scan.
++        obs_seq: (batch, time, obs_dim)
++        dones_seq: (batch, time)
++        """
++        batch_size = obs_seq.shape[0]
++        init_state = self.init_hidden_state(batch_size)
++        
++        def scan_fn(carry, step_inputs):
++            h, c = carry
++            obs_t, done_t = step_inputs
++            
++            # Reset hidden state where episode ended in previous step
++            done_t = jnp.expand_dims(done_t, axis=-1)
++            h = h * (1.0 - done_t)
++            c = c * (1.0 - done_t)
++            
++            # Feature extraction
++            x = jnp.maximum(0, jnp.dot(obs_t, params["feature"]["w"]) + params["feature"]["b"])
++            
++            # LSTM step
++            h_new, c_new = self._lstm_step(params, (h, c), x)
++            
++            # Heads
++            logits = jnp.dot(h_new, params["policy"]["w"]) + params["policy"]["b"]
++            value = jnp.dot(h_new, params["value"]["w"]) + params["value"]["b"]
++            
++            return (h_new, c_new), (logits, value[..., 0])
++
++        # Swap batch and time axes for scan: (time, batch, ...)
++        obs_seq_t = jnp.swapaxes(obs_seq, 0, 1)
++        dones_seq_t = jnp.swapaxes(dones_seq, 0, 1)
++        
++        # Padding dones to shift it by 1 step (reset state on step AFTER done)
++        # dones_seq_t has shape (time, batch).
++        # We want to reset AT step t if done was true at step t-1.
++        dones_shifted = jnp.concatenate([jnp.zeros((1, batch_size), dtype=jnp.float32), dones_seq_t[:-1]], axis=0)
++
++        _, (logits_seq_t, value_seq_t) = jax.lax.scan(scan_fn, init_state, (obs_seq_t, dones_shifted))
++        
++        # Swap back to (batch, time, ...)
++        logits_seq = jnp.swapaxes(logits_seq_t, 0, 1)
++        value_seq = jnp.swapaxes(value_seq_t, 0, 1)
++        
++        return logits_seq, value_seq
++
++    def compute_loss(self, params: dict, obs: jnp.ndarray, actions: jnp.ndarray, 
++                    old_log_probs: jnp.ndarray, advantages: jnp.ndarray, returns: jnp.ndarray,
++                    dones: jnp.ndarray,
++                    clip_ratio: float = 0.2, value_coef: float = 1.0, entropy_coef: float = 0.01) -> tuple[jnp.ndarray, dict]:
++        """Calcule la perte PPO avec BPTT sur une s├®quence temporelle."""
++        assert obs.ndim == 3, "obs must have shape (batch, time, dim)"
++        
++        actions = jnp.clip(actions, 0, self.act_dim - 1)
++        
++        # Unroll sequence
++        logits_seq, values_seq = self._forward_sequence(params, obs, dones)
++        
++        log_probs_all = jax.nn.log_softmax(logits_seq, axis=-1)
++        # Advanced indexing to get log_probs of chosen actions
++        batch_idx = jnp.arange(obs.shape[0])[:, None]
++        time_idx = jnp.arange(obs.shape[1])[None, :]
++        log_probs = log_probs_all[batch_idx, time_idx, actions]
++        
++        ratio = jnp.exp(log_probs - old_log_probs)
++        
++        advantages = (advantages - jnp.mean(advantages)) / (jnp.std(advantages) + 1e-8)
++        
++        obj1 = ratio * advantages
++        obj2 = jnp.clip(ratio, 1.0 - clip_ratio, 1.0 + clip_ratio) * advantages
++        policy_loss = -jnp.mean(jnp.minimum(obj1, obj2))
++        
++        value_loss = jnp.mean((values_seq - returns) ** 2)
++        
++        probs = jax.nn.softmax(logits_seq, axis=-1)
++        entropy = -jnp.mean(jnp.sum(probs * log_probs_all, axis=-1))
++        
++        total_loss = policy_loss + value_coef * value_loss - entropy_coef * entropy
++        
++        metrics = {
++            "policy_loss": policy_loss,
++            "value_loss": value_loss,
++            "entropy": entropy
++        }
++        
++        return total_loss, metrics
++
++    def update_params(self, params: dict, obs: jnp.ndarray, actions: jnp.ndarray, 
++                    old_log_probs: jnp.ndarray, advantages: jnp.ndarray, returns: jnp.ndarray,
++                    dones: jnp.ndarray,
++                    learning_rate: float = 3e-4) -> tuple[dict, dict]:
++        """Mise ├á jour BPTT des param├¿tres avec SGD."""
++        loss_fn = jax.value_and_grad(self.compute_loss, has_aux=True)
++        (loss, metrics), grads = loss_fn(params, obs, actions, old_log_probs, advantages, returns, dones)
++        
++        new_params = jax.tree_util.tree_map(lambda p, g: p - learning_rate * g, params, grads)
++        
++        metrics["total_loss"] = loss
++        return new_params, metrics
++
+diff --git a/distributed/train.py b/distributed/train.py
+new file mode 100644
+index 0000000..1c4de4b
+--- /dev/null
++++ b/distributed/train.py
+@@ -0,0 +1,77 @@
++import time
++import ray
++import jax
++import jax.numpy as jnp
++import numpy as np
++
++from distributed.worker import RolloutWorker
++from distributed.db_actor import DatabaseActor
++from ai.ppo import PPOAgent
++
++class LeagueTrainer:
++    def __init__(self, num_workers: int = 2, obs_dim: int = 100, act_dim: int = 200, hidden_dim: int = 64):
++        self.num_workers = num_workers
++        self.obs_dim = obs_dim
++        self.act_dim = act_dim
++        self.hidden_dim = hidden_dim
++        
++        # Initialisation du Learner global
++        self.agent = PPOAgent(obs_dim=obs_dim, act_dim=act_dim, hidden_dim=hidden_dim)
++        rng = jax.random.PRNGKey(int(time.time() * 1000) % 2147483647)
++        self.params = self.agent.init_params(rng)
++        
++        # Acteurs Ray
++        self.workers = [RolloutWorker.remote(obs_dim=obs_dim, act_dim=act_dim, hidden_dim=hidden_dim) for _ in range(num_workers)]
++        self.db_actor = DatabaseActor.remote()
++
++    def train_step(self, num_steps: int = 100):
++        """Effectue une it├®ration de collecte et d'apprentissage."""
++        if self.num_workers <= 0:
++            return {}
++        # 1. Demande de collecte (Asynchrone)
++        futures = [w.collect_rollout.remote(self.params, num_steps=num_steps) for w in self.workers]
++        
++        # 2. Attente des r├®sultats
++        trajectories = ray.get(futures)
++        
++        # 3. Stack des batchs pour conserver la dimension temporelle (batch=num_workers, time=num_steps, ...)
++        all_obs = np.stack([t["obs"] for t in trajectories], axis=0)
++        all_actions = np.stack([t["actions"] for t in trajectories], axis=0)
++        all_old_log_probs = np.stack([t["old_log_probs"] for t in trajectories], axis=0)
++        all_advantages = np.stack([t["advantages"] for t in trajectories], axis=0)
++        all_returns = np.stack([t["returns"] for t in trajectories], axis=0)
++        all_dones = np.stack([t["dones"] for t in trajectories], axis=0)
++        
++        # Conversion JAX
++        j_obs = jnp.array(all_obs)
++        j_actions = jnp.array(all_actions)
++        j_old_log_probs = jnp.array(all_old_log_probs)
++        j_advantages = jnp.array(all_advantages)
++        j_returns = jnp.array(all_returns)
++        j_dones = jnp.array(all_dones)
++        
++        # 4. Mise ├á jour PPO avec BPTT
++        self.params, metrics = self.agent.update_params(
++            self.params, j_obs, j_actions, j_old_log_probs, j_advantages, j_returns, j_dones
++        )
++        
++        # 5. Enregistrement asynchrone DB (Simulation de fin de duel)
++        self.db_actor.record_duel_stats.remote({
++            "player_1_deck": "PPO_League",
++            "player_2_deck": "PPO_League_Selfplay",
++            "winner": 1
++        })
++        
++        metrics["episodes_collected"] = len(trajectories)
++        return metrics
++
++if __name__ == "__main__":
++    ray.init(ignore_reinit_error=True)
++    trainer = LeagueTrainer(num_workers=4)
++    print("D├®marrage de l'entra├«nement distribu├®...")
++    for i in range(10):
++        t0 = time.time()
++        metrics = trainer.train_step(num_steps=100)
++        dt = time.time() - t0
++        print(f"Iteration {i+1} - Loss: {metrics['total_loss']:.4f} - Policy Loss: {metrics['policy_loss']:.4f} - Time: {dt:.2f}s")
++    print("Entra├«nement termin├®.")
+diff --git a/distributed/worker.py b/distributed/worker.py
+new file mode 100644
+index 0000000..530bd23
+--- /dev/null
++++ b/distributed/worker.py
+@@ -0,0 +1,111 @@
++import os
++os.environ["JAX_PLATFORM_NAME"] = "cpu"
++
++import ray
++import time
++import numpy as np
++import jax
++import jax.numpy as jnp
++from core.ygoenv.env import YgoEnv
++from ai.ppo import PPOAgent
++
++@ray.remote
++class RolloutWorker:
++    def __init__(self, obs_dim: int = 100, act_dim: int = 200, hidden_dim: int = 64):
++        # Initialise l'environnement ├á l'int├®rieur de l'acteur (CPU/Thread local)
++        self.env = YgoEnv()
++        self.agent = PPOAgent(obs_dim=obs_dim, act_dim=act_dim, hidden_dim=hidden_dim)
++
++    def collect_rollout(self, params: dict, num_steps: int = 100) -> dict:
++        """
++        Joue 'num_steps' ├®tapes dans l'environnement en utilisant les poids (params) du Learner.
++        Retourne la trajectoire (batch).
++        """
++        if num_steps <= 0:
++            return {"obs": np.array([]), "actions": np.array([]), "rewards": np.array([]), "old_log_probs": np.array([]), "values": np.array([]), "returns": np.array([]), "advantages": np.array([])}
++
++        obs_list = []
++        actions_list = []
++        rewards_list = []
++        log_probs_list = []
++        values_list = []
++        term_list = []
++
++        obs, _ = self.env.reset()
++
++        # init hidden state for single sequence (batch_size=1)
++        hidden_state = self.agent.init_hidden_state(1)
++
++        # Si params est vide (pour le test mock par exemple), on init dummy params
++        if not params:
++            rng = jax.random.PRNGKey(int(time.time() * 1000) % 2147483647)
++            params = self.agent.init_params(rng)
++
++        for _ in range(num_steps):
++            obs_jax = jnp.array(obs)
++            
++            # Forward pass (Policy et Value)
++            probs, value, next_hidden_state = self.agent.forward(params, hidden_state, obs_jax)
++            
++            # ├ëchantillonnage de l'action selon les probabilit├®s
++            probs_np = np.array(probs)
++            # Si le mod├¿le retourne un batch de taille 1, on extrait le vecteur
++            if probs_np.ndim == 2 and probs_np.shape[0] == 1:
++                probs_np = probs_np[0]
++            # S├®curit├® (NaN) et normalisation
++            if np.isnan(probs_np).any():
++                raise ValueError("Model output contains NaNs.")
++                
++            probs_sum = np.sum(probs_np)
++            if probs_sum == 0:
++                raise ValueError("Model probabilities sum to 0.")
++            probs_np = probs_np / probs_sum
++                
++            action = np.random.choice(len(probs_np), p=probs_np)
++            
++            # Enregistrement pour l'apprentissage
++            obs_list.append(obs)
++            actions_list.append(action)
++            
++            # log_prob approxim├® (pour PPO old_log_probs)
++            log_prob = np.log(probs_np[action] + 1e-8)
++            log_probs_list.append(log_prob)
++            values_list.append(float(np.squeeze(value)))
++
++            next_obs, reward, terminated, truncated, info = self.env.step(action)
++            rewards_list.append(reward)
++            term_list.append(terminated or truncated)
++
++            if terminated or truncated:
++                obs, _ = self.env.reset()
++                # Explicitly reset hidden state when episode ends to prevent leaking across games
++                hidden_state = self.agent.init_hidden_state(1)
++            else:
++                obs = next_obs
++                hidden_state = next_hidden_state
++
++        # Calcul basique de 'returns' et 'advantages' pour le mock (on laisse le Learner faire le calcul pr├®cis avec GAE normalement, 
++        # mais ici on simplifie pour retourner un dict complet)
++        rewards_np = np.array(rewards_list, dtype=np.float32)
++        values_np = np.array(values_list, dtype=np.float32)
++        term_np = np.array(term_list, dtype=np.float32)
++        
++        # Un returns correct tenant compte des fins d'├®pisodes
++        returns_np = np.zeros_like(rewards_np)
++        last_val = 0.0
++        for t in reversed(range(len(rewards_np))):
++            returns_np[t] = rewards_np[t] + 0.99 * last_val * (1.0 - term_np[t])
++            last_val = values_np[t]
++            
++        advantages_np = returns_np - values_np
++
++        return {
++            "obs": np.array(obs_list, dtype=np.float32),
++            "actions": np.array(actions_list, dtype=np.int32),
++            "rewards": rewards_np,
++            "old_log_probs": np.array(log_probs_list, dtype=np.float32),
++            "values": values_np,
++            "returns": returns_np,
++            "advantages": advantages_np,
++            "dones": term_np
++        }

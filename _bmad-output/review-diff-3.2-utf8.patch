@@ -1,0 +1,724 @@
+﻿diff --git a/ai/agent.py b/ai/agent.py
+index e69de29..e965ce4 100644
+--- a/ai/agent.py
++++ b/ai/agent.py
+@@ -0,0 +1,59 @@
++import random
++from typing import List, Dict, Any
++
++class DummyAgent:
++    """
++    A temporary agent for testing the end-to-end loop.
++    It simply chooses a random legal action.
++    """
++    
++    def select_action(self, legal_actions: List[Dict[str, Any]]) -> Dict[str, Any]:
++        """
++        Selects an action randomly from the list of legal actions.
++        """
++        if not legal_actions:
++            raise ValueError("No legal actions provided to DummyAgent.")
++            
++        return random.choice(legal_actions)
++
++class MCTSAgent:
++    """
++    Agent qui utilise le Monte Carlo Tree Search (Gumbel AlphaZero) 
++    pour planifier avant de choisir une action, en s'appuyant sur le PPOAgent 
++    comme heuristique (Policy/Value).
++    """
++    def __init__(self, ppo_agent, num_simulations=16, c_puct=1.25):
++        from ai.mcts import MCTS
++        self.ppo_agent = ppo_agent
++        self.mcts = MCTS(num_simulations=num_simulations, c_puct=c_puct)
++        
++    def select_action(self, env, params, hidden_state, obs):
++        """
++        Effectue une recherche MCTS et retourne l'action choisie, la politique am├®lior├®e,
++        la valeur de l'├®tat racine, et le nouvel ├®tat cach├®.
++        """
++        import numpy as np
++        # get legal actions directly from env if supported, else assume all are legal
++        try:
++            legal_actions = env.get_legal_actions()
++        except AttributeError:
++            legal_actions = np.ones((self.ppo_agent.act_dim,), dtype=np.bool_)
++            
++        action, policy_improved = self.mcts.search(
++            env=env,
++            agent=self.ppo_agent,
++            params=params,
++            hidden_state=hidden_state,
++            obs=obs,
++            legal_actions=legal_actions
++        )
++        
++        # We also need to return value and next_hidden to continue the rollout correctly
++        # We can just do a forward pass on the selected action to get the next hidden state
++        # Or, more simply, do a forward pass on the current state to get value & next hidden
++        # for the worker's trajectory record.
++        probs, value, next_hidden = self.ppo_agent.forward(params, hidden_state, obs)
++        value = float(np.array(value))
++        next_hidden = (np.array(next_hidden[0]), np.array(next_hidden[1]))
++        
++        return action, policy_improved, value, next_hidden
+diff --git a/ai/mcts.py b/ai/mcts.py
+index e69de29..5c78b6b 100644
+--- a/ai/mcts.py
++++ b/ai/mcts.py
+@@ -0,0 +1,156 @@
++import math
++import numpy as np
++import jax.numpy as jnp
++
++class MCTSNode:
++    def __init__(self, prior: float):
++        self.prior = prior
++        self.visit_count = 0
++        self.value_sum = 0.0
++        self.children = {}
++        self.hidden_state = None
++        self.reward = 0.0
++        self.is_expanded = False
++
++    def value(self):
++        if self.visit_count == 0:
++            return 0.0
++        return self.value_sum / self.visit_count
++
++class MCTS:
++    def __init__(self, num_simulations: int = 16, c_puct: float = 1.25):
++        self.num_simulations = num_simulations
++        self.c_puct = c_puct
++
++    def _puct_score(self, parent: MCTSNode, child: MCTSNode) -> float:
++        pb_c = math.log((parent.visit_count + 1.25 + 19652.0) / 19652.0) + self.c_puct
++        pb_c *= math.sqrt(parent.visit_count) / (child.visit_count + 1)
++        prior_score = pb_c * child.prior
++        value_score = child.value()
++        return value_score + prior_score
++
++    def search(self, env, agent, params, hidden_state, obs, legal_actions):
++        """
++        Effectue la recherche MCTS (Gumbel AlphaZero style) depuis l'├®tat actuel.
++        env: l'environnement (doit supporter save_state() et restore_state())
++        agent: PPOAgent contenant la fonction forward()
++        params: param├¿tres de l'agent
++        hidden_state: ├®tat cach├® actuel (h, c) pour un seul ├®l├®ment (pas de batch dim)
++        obs: observation courante
++        legal_actions: masque bool├®en des actions l├®gales
++        """
++        root = MCTSNode(0.0)
++        
++        # 1. Expand root
++        probs, value, next_hidden_state = agent.forward(params, hidden_state, obs)
++        # Convert to numpy for tree operations (avoid JAX overhead in the tree search loop)
++        probs = np.array(probs)
++        value = float(value)
++        next_hidden_state = (np.array(next_hidden_state[0]), np.array(next_hidden_state[1]))
++        
++        # Apply legal actions mask
++        legal_actions = np.array(legal_actions, dtype=np.bool_)
++        probs = probs * legal_actions
++        sum_probs = np.sum(probs)
++        if sum_probs > 0:
++            probs /= sum_probs
++        else:
++            probs = legal_actions / np.sum(legal_actions)
++            
++        # Gumbel noise at root for exploration
++        gumbel_noise = np.random.gumbel(loc=0.0, scale=1.0, size=probs.shape)
++        gumbel_noise = gumbel_noise * legal_actions
++        # Add to logits-equivalent and softmax (Simplified Gumbel AlphaZero approach)
++        logits = np.log(probs + 1e-8) + gumbel_noise
++        exp_logits = np.exp(logits) * legal_actions
++        
++        sum_exp_logits = np.sum(exp_logits)
++        if sum_exp_logits > 0:
++            probs_with_noise = exp_logits / sum_exp_logits
++        else:
++            probs_with_noise = probs
++
++        root.is_expanded = True
++        root.hidden_state = next_hidden_state
++        for a in range(len(probs)):
++            if legal_actions[a]:
++                root.children[a] = MCTSNode(prior=float(probs_with_noise[a]))
++
++        # Save base environment state
++        base_state = env.save_state()
++
++        # 2. Simulations
++        for _ in range(self.num_simulations):
++            node = root
++            current_hidden = root.hidden_state
++            search_path = [node]
++            env.restore_state(base_state)
++            
++            # Selection
++            while node.is_expanded and len(node.children) > 0:
++                action, child = max(
++                    node.children.items(),
++                    key=lambda item: self._puct_score(node, item[1])
++                )
++                node = child
++                search_path.append(node)
++                obs, reward, terminated, truncated, _ = env.step(action)
++                done = terminated or truncated
++                if node.is_expanded:
++                    current_hidden = node.hidden_state
++                
++            value_for_backprop = 0.0
++            
++            if not done:
++                # Expansion & Evaluation
++                probs, value, next_hidden = agent.forward(params, current_hidden, obs)
++                probs = np.array(probs)
++                value_for_backprop = float(value)
++                next_hidden = (np.array(next_hidden[0]), np.array(next_hidden[1]))
++                
++                # Assume all actions are legal in deeper nodes for simplicity if we don't have access to deep legal_actions
++                # In a real engine, we query legal actions after env.step()
++                try:
++                    legal_actions_deep = env.get_legal_actions()
++                except AttributeError:
++                    legal_actions_deep = np.ones_like(probs, dtype=np.bool_)
++                    
++                probs = probs * legal_actions_deep
++                sum_probs = np.sum(probs)
++                if sum_probs > 0:
++                    probs /= sum_probs
++                else:
++                    probs = legal_actions_deep / np.sum(legal_actions_deep)
++                    
++                node.is_expanded = True
++                node.hidden_state = next_hidden
++                for a in range(len(probs)):
++                    if legal_actions_deep[a]:
++                        node.children[a] = MCTSNode(prior=float(probs[a]))
++            else:
++                value_for_backprop = float(reward)
++
++            # Backpropagation
++            for n in reversed(search_path):
++                n.value_sum += value_for_backprop
++                n.visit_count += 1
++                # Flip value for opponent if it's a 2-player zero-sum game with alternating turns
++                # Here we assume a single-agent perspective or symmetric zero-sum (simplification)
++                value_for_backprop = -value_for_backprop 
++
++        # Restore original env state
++        env.restore_state(base_state)
++
++        # 3. Policy Improvement
++        visit_counts = np.zeros(len(probs_with_noise))
++        for a, child in root.children.items():
++            visit_counts[a] = child.visit_count
++            
++        if np.sum(visit_counts) > 0:
++            policy_improved = visit_counts / np.sum(visit_counts)
++        else:
++            policy_improved = legal_actions / np.sum(legal_actions)
++            
++        action = np.argmax(policy_improved)
++        
++        return int(action), policy_improved
+diff --git a/core/ygoenv/env.py b/core/ygoenv/env.py
+new file mode 100644
+index 0000000..930ad81
+--- /dev/null
++++ b/core/ygoenv/env.py
+@@ -0,0 +1,74 @@
++import gymnasium as gym
++import numpy as np
++from core.ygoenv.wrapper import YgoEngine, EngineCrashError
++
++class YgoEnv(gym.Env):
++    """
++    Environnement Gym standardis├® encapsulant le moteur C++ (ocgcore) via YgoEngine.
++    """
++    
++    def __init__(self):
++        super(YgoEnv, self).__init__()
++        
++        # Dimensions pour le MVP:
++        # - Action space: par exemple 200 actions discr├¿tes possibles (id de l'action)
++        self.action_space = gym.spaces.Discrete(200)
++        
++        # - Observation space: tenseur plat float32 de taille fixe (ex: 100) repr├®sentant le terrain
++        self.observation_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(100,), dtype=np.float32)
++        
++        self.engine = YgoEngine()
++        self._current_state = None
++        
++    def _get_observation(self) -> np.ndarray:
++        # TODO: Appeler l'engine pour extraire le vrai terrain
++        # MVP: retourner un tableau rempli de z├®ros
++        return np.zeros(self.observation_space.shape, dtype=np.float32)
++        
++    def reset(self, seed=None, options=None) -> tuple[np.ndarray, dict]:
++        super().reset(seed=seed, options=options)
++        
++        # Initialiser un duel ou r├®initialiser l'├®tat
++        self._current_state = {"phase": "DRAW", "turn": 1}
++        
++        # Validation via le moteur (mock)
++        _ = self.engine.get_legal_actions(self._current_state)
++        
++        obs = self._get_observation()
++        info = {}
++        
++        return obs, info
++        
++    def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict]:
++        if self._current_state is None:
++            raise RuntimeError("L'environnement doit ├¬tre r├®initialis├® via reset() avant le premier step().")
++            
++        if not self.action_space.contains(action):
++            raise ValueError(f"Action invalide: {action}")
++            
++        # Appliquer l'action au state
++        self._current_state["last_action"] = action
++        
++        # Valider et obtenir les prochaines actions via le moteur
++        # (Fail Fast: les erreurs EngineCrashError se propagent naturellement)
++        legal_actions = self.engine.get_legal_actions(self._current_state)
++            
++        # Simuler un passage au tour suivant ou fin de partie
++        obs = self._get_observation()
++        reward = 0.0
++        terminated = False
++        truncated = False
++        info = {"legal_actions": legal_actions}
++        
++        return obs, reward, terminated, truncated, info
++
++    def save_state(self) -> dict:
++        """Sauvegarde l'├®tat complet du duel (clone) pour le MCTS."""
++        # Dans le MVP sans ocgcore complet, on copie le dictionnaire d'├®tat
++        import copy
++        return copy.deepcopy(self._current_state)
++
++    def restore_state(self, state: dict):
++        """Restaure un ├®tat sauvegard├® du duel."""
++        import copy
++        self._current_state = copy.deepcopy(state)
+diff --git a/distributed/worker.py b/distributed/worker.py
+new file mode 100644
+index 0000000..bcc6205
+--- /dev/null
++++ b/distributed/worker.py
+@@ -0,0 +1,130 @@
++import os
++os.environ["JAX_PLATFORM_NAME"] = "cpu"
++
++import ray
++import time
++import numpy as np
++import jax
++import jax.numpy as jnp
++from core.ygoenv.env import YgoEnv
++from ai.ppo import PPOAgent
++from ai.agent import MCTSAgent
++
++@ray.remote
++class RolloutWorker:
++    def __init__(self, obs_dim: int = 100, act_dim: int = 200, hidden_dim: int = 64, use_mcts: bool = True, num_simulations: int = 8):
++        # Initialise l'environnement ├á l'int├®rieur de l'acteur (CPU/Thread local)
++        self.env = YgoEnv()
++        self.ppo_agent = PPOAgent(obs_dim=obs_dim, act_dim=act_dim, hidden_dim=hidden_dim)
++        self.use_mcts = use_mcts
++        if self.use_mcts:
++            self.agent = MCTSAgent(self.ppo_agent, num_simulations=num_simulations)
++        else:
++            self.agent = self.ppo_agent
++            
++        self.current_obs, _ = self.env.reset()
++        self.current_hidden_state = self.ppo_agent.init_hidden_state(1)
++
++    def collect_rollout(self, params: dict, num_steps: int = 100) -> dict:
++        """
++        Joue 'num_steps' ├®tapes dans l'environnement en utilisant les poids (params) du Learner.
++        Retourne la trajectoire (batch).
++        """
++        if num_steps <= 0:
++            return {"obs": np.array([]), "actions": np.array([]), "rewards": np.array([]), "old_log_probs": np.array([]), "values": np.array([]), "returns": np.array([]), "advantages": np.array([])}
++
++        obs_list = []
++        actions_list = []
++        rewards_list = []
++        log_probs_list = []
++        values_list = []
++        term_list = []
++
++        obs = self.current_obs
++        hidden_state = self.current_hidden_state
++
++        # Si params est vide (pour le test mock par exemple), on init dummy params
++        if not params:
++            rng = jax.random.PRNGKey(int(time.time() * 1000) % 2147483647)
++            params = self.ppo_agent.init_params(rng)
++
++        for _ in range(num_steps):
++            obs_jax = jnp.asarray(obs, dtype=jnp.float32)
++            
++            if self.use_mcts:
++                action, policy_improved, value, next_hidden_state = self.agent.select_action(
++                    env=self.env,
++                    params=params,
++                    hidden_state=hidden_state,
++                    obs=obs_jax
++                )
++                probs_np = policy_improved
++            else:
++                # Forward pass (Policy et Value)
++                probs, value, next_hidden_state = self.agent.forward(params, hidden_state, obs_jax)
++                probs_np = np.array(probs)
++                if probs_np.ndim == 2 and probs_np.shape[0] == 1:
++                    probs_np = probs_np[0]
++                
++                if np.isnan(probs_np).any():
++                    raise ValueError("Model output contains NaNs.")
++                    
++                probs_sum = np.sum(probs_np)
++                probs_np = probs_np / probs_sum
++                action = np.random.choice(len(probs_np), p=probs_np)
++            
++            # Enregistrement pour l'apprentissage
++            obs_list.append(obs)
++            actions_list.append(action)
++            
++            # log_prob approxim├® (pour PPO old_log_probs)
++            log_prob = np.log(probs_np[action] + 1e-8)
++            log_probs_list.append(log_prob)
++            values_list.append(float(np.squeeze(value)))
++
++            next_obs, reward, terminated, truncated, info = self.env.step(action)
++            rewards_list.append(reward)
++            term_list.append(terminated or truncated)
++
++            if terminated or truncated:
++                obs, _ = self.env.reset()
++                # Explicitly reset hidden state when episode ends to prevent leaking across games
++                hidden_state = self.ppo_agent.init_hidden_state(1)
++            else:
++                obs = next_obs
++                hidden_state = next_hidden_state
++
++        self.current_obs = obs
++        self.current_hidden_state = hidden_state
++
++        # Calcul basique de 'returns' et 'advantages' pour le mock (on laisse le Learner faire le calcul pr├®cis avec GAE normalement, 
++        # mais ici on simplifie pour retourner un dict complet)
++        rewards_np = np.array(rewards_list, dtype=np.float32)
++        values_np = np.array(values_list, dtype=np.float32)
++        term_np = np.array(term_list, dtype=np.float32)
++        
++        # Un returns correct tenant compte des fins d'├®pisodes
++        returns_np = np.zeros_like(rewards_np)
++        
++        # Value bootstrapping for truncated sequences
++        last_val = 0.0
++        if not term_list[-1]:
++            _, next_val, _ = self.ppo_agent.forward(params, hidden_state, jnp.asarray(obs, dtype=jnp.float32))
++            last_val = float(np.squeeze(next_val))
++            
++        for t in reversed(range(len(rewards_np))):
++            returns_np[t] = rewards_np[t] + 0.99 * last_val * (1.0 - term_np[t])
++            last_val = values_np[t]
++            
++        advantages_np = returns_np - values_np
++
++        return {
++            "obs": np.array(obs_list, dtype=np.float32),
++            "actions": np.array(actions_list, dtype=np.int32),
++            "rewards": rewards_np,
++            "old_log_probs": np.array(log_probs_list, dtype=np.float32),
++            "values": values_np,
++            "returns": returns_np,
++            "advantages": advantages_np,
++            "dones": term_np
++        }
+diff --git a/tests/ai/test_agent.py b/tests/ai/test_agent.py
+new file mode 100644
+index 0000000..f8a433e
+--- /dev/null
++++ b/tests/ai/test_agent.py
+@@ -0,0 +1,146 @@
++import pytest
++import jax
++import jax.numpy as jnp
++import numpy as np
++from ai.agent import DummyAgent, MCTSAgent
++from ai.ppo import PPOAgent
++
++@pytest.fixture
++def dummy_agent():
++    return DummyAgent()
++
++def test_dummy_agent_chooses_valid_action(dummy_agent):
++    legal_actions = [
++        {"action_type": 1, "card_id": 1234},
++        {"action_type": 2, "card_id": 5678}
++    ]
++    chosen = dummy_agent.select_action(legal_actions)
++    assert chosen in legal_actions
++
++def test_dummy_agent_empty_actions_raises_error(dummy_agent):
++    with pytest.raises(ValueError):
++        dummy_agent.select_action([])
++
++@pytest.fixture
++def rng():
++    return jax.random.PRNGKey(42)
++
++@pytest.fixture
++def ppo_agent():
++    return PPOAgent(obs_dim=100, act_dim=200, hidden_dim=64)
++
++@pytest.fixture
++def ppo_params(ppo_agent, rng):
++    return ppo_agent.init_params(rng)
++
++def test_ppo_agent_forward_pass(ppo_agent, ppo_params, rng):
++    obs = jax.random.normal(rng, (4, 100), dtype=jnp.float32)
++    hidden_state = ppo_agent.init_hidden_state(4)
++    
++    probs, values, next_hidden = ppo_agent.forward(ppo_params, hidden_state, obs)
++    
++    assert probs.shape == (4, 200)
++    assert values.shape == (4,)
++    assert probs.dtype == jnp.float32
++    assert values.dtype == jnp.float32
++    
++    sums = jnp.sum(probs, axis=-1)
++    assert jnp.allclose(sums, jnp.ones_like(sums), atol=1e-5)
++
++def test_ppo_loss_computation(ppo_agent, ppo_params, rng):
++    k1, k2, k3, k4, k5, k6 = jax.random.split(rng, 6)
++    batch_size = 4
++    time_steps = 5
++    
++    obs = jax.random.normal(k1, (batch_size, time_steps, 100), dtype=jnp.float32)
++    actions = jax.random.randint(k2, (batch_size, time_steps), minval=0, maxval=200, dtype=jnp.int32)
++    old_log_probs = jax.random.uniform(k3, (batch_size, time_steps), minval=-2.0, maxval=0.0, dtype=jnp.float32)
++    advantages = jax.random.normal(k4, (batch_size, time_steps), dtype=jnp.float32)
++    returns = jax.random.normal(k5, (batch_size, time_steps), dtype=jnp.float32)
++    dones = jax.random.randint(k6, (batch_size, time_steps), minval=0, maxval=2, dtype=jnp.int32).astype(jnp.float32)
++    
++    loss_fn = jax.jit(ppo_agent.compute_loss)
++    loss, metrics = loss_fn(ppo_params, obs, actions, old_log_probs, advantages, returns, dones)
++    
++    assert not jnp.isnan(loss)
++    assert not jnp.isinf(loss)
++    assert loss.dtype == jnp.float32
++    assert "policy_loss" in metrics
++    assert "value_loss" in metrics
++    assert "entropy" in metrics
++
++def test_ppo_update_params(ppo_agent, ppo_params, rng):
++    k1, k2, k3, k4, k5, k6 = jax.random.split(rng, 6)
++    batch_size = 4
++    time_steps = 5
++    
++    obs = jax.random.normal(k1, (batch_size, time_steps, 100), dtype=jnp.float32)
++    actions = jax.random.randint(k2, (batch_size, time_steps), minval=0, maxval=200, dtype=jnp.int32)
++    old_log_probs = jax.random.uniform(k3, (batch_size, time_steps), minval=-2.0, maxval=0.0, dtype=jnp.float32)
++    advantages = jax.random.normal(k4, (batch_size, time_steps), dtype=jnp.float32)
++    returns = jax.random.normal(k5, (batch_size, time_steps), dtype=jnp.float32)
++    dones = jax.random.randint(k6, (batch_size, time_steps), minval=0, maxval=2, dtype=jnp.int32).astype(jnp.float32)
++    
++    update_fn = jax.jit(ppo_agent.update_params)
++    new_params, metrics = update_fn(ppo_params, obs, actions, old_log_probs, advantages, returns, dones)
++    
++    assert "total_loss" in metrics
++    # Verify params updated
++    w1_old = ppo_params["policy"]["w"]
++    w1_new = new_params["policy"]["w"]
++    assert not jnp.allclose(w1_old, w1_new)
++
++
++class MockEnv:
++    def __init__(self, obs_dim, act_dim):
++        self.obs_dim = obs_dim
++        self.act_dim = act_dim
++        
++    def save_state(self):
++        return {"mock_state": 1}
++        
++    def restore_state(self, state):
++        pass
++        
++    def get_obs(self):
++        return np.ones((self.obs_dim,), dtype=np.float32)
++        
++    def get_legal_actions(self):
++        return np.ones((self.act_dim,), dtype=np.bool_)
++        
++    def step(self, action):
++        obs = np.ones((self.obs_dim,), dtype=np.float32)
++        reward = 0.0
++        done = False
++        info = {}
++        return obs, reward, done, info
++
++def test_mcts_agent_select_action():
++    obs_dim = 10
++    act_dim = 5
++    hidden_dim = 16
++    
++    env = MockEnv(obs_dim, act_dim)
++    ppo_agent = PPOAgent(obs_dim=obs_dim, act_dim=act_dim, hidden_dim=hidden_dim)
++    rng = jax.random.PRNGKey(42)
++    params = ppo_agent.init_params(rng)
++    hidden_state = ppo_agent.init_hidden_state(1)
++    
++    # Extract the single state since we're operating without batch dimension in MCTS loop usually
++    h, c = hidden_state
++    hidden_state_single = (h[0], c[0])
++    
++    agent = MCTSAgent(ppo_agent, num_simulations=4)
++    
++    action, policy_improved, value, next_hidden = agent.select_action(
++        env=env,
++        params=params,
++        hidden_state=hidden_state_single,
++        obs=env.get_obs()
++    )
++    
++    assert isinstance(action, (int, np.integer))
++    assert 0 <= action < act_dim
++    assert policy_improved.shape == (act_dim,)
++    assert isinstance(value, float)
++    assert next_hidden is not None
+diff --git a/tests/core/ygoenv/test_env.py b/tests/core/ygoenv/test_env.py
+new file mode 100644
+index 0000000..9ee17fc
+--- /dev/null
++++ b/tests/core/ygoenv/test_env.py
+@@ -0,0 +1,51 @@
++import pytest
++import numpy as np
++import gymnasium as gym
++from core.ygoenv.env import YgoEnv
++
++def test_ygoenv_initialization():
++    env = YgoEnv()
++    assert isinstance(env.action_space, gym.spaces.Discrete)
++    # The observation space for now will be a flat array (e.g. 100 features)
++    assert isinstance(env.observation_space, gym.spaces.Box)
++    assert env.observation_space.dtype == np.float32
++    
++def test_ygoenv_reset():
++    env = YgoEnv()
++    obs, info = env.reset()
++    assert isinstance(obs, np.ndarray)
++    assert obs.dtype == np.float32
++    assert obs.shape == env.observation_space.shape
++    assert isinstance(info, dict)
++
++def test_ygoenv_step():
++    env = YgoEnv()
++    env.reset()
++    
++    # action 1 is the mock action in wrapper.py
++    action = 1
++    obs, reward, terminated, truncated, info = env.step(action)
++    
++    assert isinstance(obs, np.ndarray)
++    assert obs.dtype == np.float32
++    assert isinstance(reward, float)
++    assert isinstance(terminated, bool)
++    assert isinstance(truncated, bool)
++    assert isinstance(info, dict)
++
++def test_ygoenv_save_restore_state():
++    env = YgoEnv()
++    env.reset()
++    
++    # Save state
++    state = env.save_state()
++    assert state is not None
++    
++    # Take action
++    env.step(1)
++    
++    # Restore state
++    env.restore_state(state)
++    
++    # Verify restored state
++    assert env._current_state == state
+diff --git a/tests/ai/test_mcts.py b/tests/ai/test_mcts.py
+new file mode 100644
+index 0000000..60f3487
+--- /dev/null
++++ b/tests/ai/test_mcts.py
+@@ -0,0 +1,68 @@
++import pytest
++import jax
++import jax.numpy as jnp
++import numpy as np
++
++from ai.mcts import MCTS, MCTSNode
++from ai.ppo import PPOAgent
++
++class MockEnv:
++    def __init__(self, obs_dim, act_dim):
++        self.obs_dim = obs_dim
++        self.act_dim = act_dim
++        
++    def save_state(self):
++        return {"mock_state": 1}
++        
++    def restore_state(self, state):
++        pass
++        
++    def get_obs(self):
++        return np.ones((self.obs_dim,), dtype=np.float32)
++        
++    def get_legal_actions(self):
++        return np.ones((self.act_dim,), dtype=np.bool_)
++        
++    def step(self, action):
++        obs = np.ones((self.obs_dim,), dtype=np.float32)
++        reward = 0.0
++        done = False
++        info = {}
++        return obs, reward, done, info
++
++def test_mcts_initialization():
++    mcts = MCTS(num_simulations=8, c_puct=1.0)
++    assert mcts.num_simulations == 8
++    assert mcts.c_puct == 1.0
++
++def test_mcts_search():
++    obs_dim = 10
++    act_dim = 5
++    hidden_dim = 16
++    
++    env = MockEnv(obs_dim, act_dim)
++    agent = PPOAgent(obs_dim=obs_dim, act_dim=act_dim, hidden_dim=hidden_dim)
++    rng = jax.random.PRNGKey(42)
++    params = agent.init_params(rng)
++    hidden_state = agent.init_hidden_state(1)
++    
++    # Extract the single state since we're operating without batch dimension in MCTS loop usually
++    h, c = hidden_state
++    hidden_state_single = (h[0], c[0])
++    
++    mcts = MCTS(num_simulations=4)
++    
++    # Test search returns an action and improved policy
++    action, policy_improved = mcts.search(
++        env=env,
++        agent=agent,
++        params=params,
++        hidden_state=hidden_state_single,
++        obs=env.get_obs(),
++        legal_actions=env.get_legal_actions()
++    )
++    
++    assert isinstance(action, (int, np.integer))
++    assert 0 <= action < act_dim
++    assert policy_improved.shape == (act_dim,)
++    assert np.isclose(np.sum(policy_improved), 1.0)
