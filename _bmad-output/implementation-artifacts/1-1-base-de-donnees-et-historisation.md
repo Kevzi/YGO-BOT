@@ -4,7 +4,7 @@ baseline_commit: a48a14a00d6c080546cb3e524d95c043de5ed15b
 
 # Story 1.1: Base de Données et Historisation (SQLite + Alembic)
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -88,3 +88,19 @@ Antigravity (DeepMind)
 - `schemas/duel.py` (nouveau)
 - `tests/conftest.py` (nouveau)
 - `tests/test_db.py` (nouveau)
+
+### Review Findings
+
+- [x] [Review][Defer] Validation JSON — Quel schéma ou typage Pydantic strict utiliser pour les champs `state` et `action` de `GameTransition` ? (deferred, pre-existing. Justification: Conservons Dict[str, Any] pour l'instant. La structure sera verrouillée lors de la Story 1.3)
+- [x] [Review][Defer] Session DB applicative — Faut-il créer un fichier `core/db.py` exposant la factory de session et `get_db()` pour FastAPI dès maintenant ? (deferred, pre-existing. Justification: Réservé pour la Story 1.3, lié à FastAPI Depends)
+- [x] [Review][Patch] Contrainte `winner` [schemas/duel.py] — Ajouter `Field(ge=1, le=2)` ou Enum.
+- [x] [Review][Patch] Contrainte `step` [schemas/duel.py] — Ajouter `Field(ge=0)`.
+- [x] [Review][Patch] CASCADE manquante sur `duel_id` [db/models.py] — Ajouter `ondelete="CASCADE"`.
+- [x] [Review][Patch] Index manquant sur `duel_id` [db/models.py] — Ajouter `index=True`.
+- [x] [Review][Patch] Timezone pour les dates [db/models.py] — Ajouter `DateTime(timezone=True)`.
+- [x] [Review][Patch] Configuration Alembic [alembic/env.py] — Ajouter `compare_type=True`.
+- [x] [Review][Patch] Leaky Create Schema [schemas/duel.py] — Ne pas permettre la création directe du champ `winner` dans `DuelStatsCreate`.
+- [x] [Review][Patch] Contrainte de longueur [schemas/duel.py] — Ajouter `max_length=255` pour les decks.
+- [x] [Review][Patch] Contrainte `reward` [schemas/duel.py] — Ajouter `allow_inf_nan=False`.
+- [x] [Review][Patch] Configuration WAL [db/session ou env.py] — Ajouter l'exécution de `PRAGMA journal_mode=WAL`.
+- [x] [Review][Patch] Dossier data/ dans git — Ajouter un `.gitkeep` pour s'assurer que le dossier existe lors du `alembic upgrade`.
