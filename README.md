@@ -29,6 +29,8 @@ To overcome the massive computational requirement of C++ environment simulations
 
 ```mermaid
 graph TD
+    PS((SelfPlayManager<br/>Parameter Server))
+    
     subgraph "CPU Cluster (Massive Parallelism)"
         W1[Rollout Worker 1<br/>libocgcore C++]
         W2[Rollout Worker 2<br/>libocgcore C++]
@@ -39,16 +41,15 @@ graph TD
         L[Learner Node<br/>JAX/Flax XLA Compilation]
     end
     
-    PS((SelfPlayManager<br/>Parameter Server))
+    PS -. "Pull Latest/Historical Weights<br/>(League Training)" .-> W1
+    PS -. "Pull Weights" .-> W2
+    PS -. "Pull Weights" .-> W3
     
     W1 -- "Batch Rollouts<br/>(State, Action, Reward)" --> L
     W2 -- "Batch Rollouts" --> L
     W3 -- "Batch Rollouts" --> L
     
     L -- "Push Updated Weights" --> PS
-    PS -. "Pull Latest/Historical Weights<br/>(League Training)" .-> W1
-    PS -. "Pull Weights" .-> W2
-    PS -. "Pull Weights" .-> W3
 ```
 
 - **Rollout Workers (CPU)**: Hundreds of lightweight actors run the C++ Yu-Gi-Oh! engine (`libocgcore`) to simulate games in parallel. They are restricted from GPU access to avoid VRAM bottlenecks.
