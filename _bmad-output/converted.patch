@@ -1,0 +1,339 @@
+﻿diff --git a/_bmad-output/implementation-artifacts/6-3-boucle-apprentissage-asynchrone.md b/_bmad-output/implementation-artifacts/6-3-boucle-apprentissage-asynchrone.md
+new file mode 100644
+index 0000000..73d3801
+--- /dev/null
++++ b/_bmad-output/implementation-artifacts/6-3-boucle-apprentissage-asynchrone.md
+@@ -0,0 +1,55 @@
++---
++baseline_commit: NO_VCS
++---
++
++# Story 6.3: Boucle d'Apprentissage Asynchrone (Self-Play)
++
++**Epic:** Epic 6: Intelligence Artificielle et Planification (Deep RL)
++
++As a Chercheur en IA,
++I want de mettre en place une boucle d'auto-jeu asynchrone (Self-Play),
++So that l'agent puisse constamment affronter des versions ant├®rieures de lui-m├¬me et collecter des trajectoires pour am├®liorer continuellement sa strat├®gie et ├®viter d'exploiter un adversaire al├®atoire.
++
++## Acceptance Criteria
++
++- [ ] **Given** l'ex├®cution du script `scripts/train.py`
++- [ ] **When** les environnements parall├¿les sont lanc├®s
++- [ ] **Then** les agents jouent asynchronement contre des it├®rations pass├®es de leur propre mod├¿le
++- [ ] **And** les trajectoires g├®n├®r├®es mettent ├á jour les poids du r├®seau JAX PPO de mani├¿re stable sans s'enfermer dans un optimum local trivial.
++
++## Tasks/Subtasks
++
++- [ ] Adapter `scripts/train.py` pour orchestrer le Self-Play (pool de mod├¿les).
++- [ ] Utiliser l'ActorCriticLSTM (et potentiellement le MCTS) dans la collecte des trajectoires (RolloutWorker).
++- [ ] Maintenir un pool d'adversaires historiques (anciens checkpoints du mod├¿le) contre lesquels s'entra├«ner.
++- [ ] G├®rer l'alternance des tours entre le mod├¿le principal et le mod├¿le historique dans l'environnement.
++- [ ] Ajuster le calcul du GAE (Generalized Advantage Estimation) pour s'aligner sur la perspective du joueur apprenant.
++
++## Dev Notes
++
++**Architecture Requirements:**
++- Refonte de `scripts/train.py` (ou cr├®ation de `ai/self_play.py`) pour g├®rer de multiples it├®rations de l'agent.
++- La boucle doit conserver les checkpoints p├®riodiquement et tirer au sort un adversaire historique.
++- L'environnement (`YgoEnv`) simule un duel entre player 0 et player 1. Il faut que l'Actor courant contr├┤le un joueur, et l'historique l'autre, tout en g├®rant les observations et actions depuis la bonne perspective.
++- L'entra├«nement doit se faire avec l'omniscience activ├®e (`YgoEnv(omniscience=True)`) pendant le MVP.
++
++**Previous Learnings:**
++- MCTS a ├®t├® impl├®ment├® (`ai/mcts.py`) et l'environnement utilise `action_history` pour cloner l'├®tat. Le MCTS peut s'av├®rer lent si utilis├® syst├®matiquement pour chaque pas d'entra├«nement sans JIT.
++- L'environnement g├¿re d├®sormais le mode omniscient (`omniscience=True`), ce qui l├¿ve les erreurs li├®es au masquage aveugle.
++- Des correctifs ont ├®t├® appliqu├®s sur les calculs de probabilit├® (division par z├®ro ├®vit├®e avec `max(..., 1e-8)`) et l'application stricte du `action_mask`.
++
++## Dev Agent Record
++
++**Implementation Plan:**
++
++**Completion Notes:**
++
++## File List
++
++- `scripts/train.py` [UPDATE]
++- `ai/self_play.py` [NEW]
++
++## Change Log
++
++## Status
++ready-for-dev
+diff --git a/ai/self_play.py b/ai/self_play.py
+new file mode 100644
+index 0000000..07a7e33
+--- /dev/null
++++ b/ai/self_play.py
+@@ -0,0 +1,41 @@
++import ray
++import numpy as np
++import random
++import copy
++
++@ray.remote
++class SelfPlayManager:
++    """
++    Gestionnaire centralis├® pour le League Training.
++    Stocke les snapshots historiques du mod├¿le et fournit des adversaires.
++    """
++    def __init__(self, max_history=50):
++        self.history = []
++        self.max_history = max_history
++
++    def add_snapshot(self, params):
++        """Ajoute un snapshot de poids dans l'historique."""
++        # On copie profond├®ment pour ├®viter les mutations
++        # params est un PyTree de ndarrays JAX. copy.deepcopy fonctionne g├®n├®ralement.
++        # Mais pour ├¬tre s├╗r avec JAX, on peut juste stocker la r├®f├®rence si le Learner 
++        # recr├®e un nouvel arbre ├á chaque update, ce qui est le cas avec optax.
++        self.history.append(params)
++        if len(self.history) > self.max_history:
++            self.history.pop(0)
++            
++        print(f"[SelfPlayManager] Snapshot ajout├®. Taille de l'historique: {len(self.history)}")
++
++    def get_opponent(self, latest_params):
++        """
++        Retourne les poids d'un adversaire.
++        50% du temps le mod├¿le le plus r├®cent (latest_params),
++        50% du temps un mod├¿le historique al├®atoire.
++        """
++        if not self.history or random.random() < 0.5:
++            return latest_params
++            
++        idx = random.randint(0, len(self.history) - 1)
++        return self.history[idx]
++        
++    def get_history_size(self):
++        return len(self.history)
+diff --git a/core/ygoenv/env.py b/core/ygoenv/env.py
+index bfc4acf..9a6b72e 100644
+--- a/core/ygoenv/env.py
++++ b/core/ygoenv/env.py
+@@ -234,7 +234,11 @@ class YgoEnv(gym.Env):
+         legal_actions = self.get_legal_actions()
+         obs = self._get_observation()
+         
+-        return obs, {"legal_actions": legal_actions}
++        current_player = 0
++        if self._current_state_actions and len(self._current_state_actions) > 0:
++            current_player = self._current_state_actions[0].get("player", 0)
++            
++        return obs, {"legal_actions": legal_actions, "current_player": current_player}
+         
+     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict]:
+         if self._current_state is None:
+@@ -253,10 +257,10 @@ class YgoEnv(gym.Env):
+         self.engine.translate_and_set_response(action, self._current_state_actions)
+         
+         # Le moteur simule le reste jusqu'├á la prochaine attente
+-        new_actions = self.engine.get_legal_actions(self._current_state)
++        legal_actions_mask = self.get_legal_actions()
+         
+         # Parser les messages pour chercher MSG_WIN (5) ou autres events importants
+-        for a in new_actions:
++        for a in self._current_state_actions:
+             if a.get("msg") == "WIN":
+                 terminated = True
+                 # player 0 = nous, player 1 = adversaire, player 2 = draw
+@@ -275,7 +279,16 @@ class YgoEnv(gym.Env):
+             truncated = True
+             
+         obs = self._get_observation()
+-        info = {"legal_actions": new_actions}
++        
++        # D├®terminer le joueur courant
++        current_player = 0
++        if self._current_state_actions and len(self._current_state_actions) > 0:
++            current_player = self._current_state_actions[0].get("player", 0)
++            
++        info = {
++            "legal_actions": legal_actions_mask,
++            "current_player": current_player
++        }
+         
+         return obs, reward, terminated, truncated, info
+ 
+diff --git a/scripts/train.py b/scripts/train.py
+new file mode 100644
+index 0000000..a5e87a9
+--- /dev/null
++++ b/scripts/train.py
+@@ -0,0 +1,176 @@
++import ray
++import numpy as np
++import jax
++import time
++import sys
++import os
++
++# Ensure the root directory is in the Python path
++sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++
++from core.ygoenv.env import YgoEnv
++from ai.ppo import PPOAgent
++
++@ray.remote
++class RolloutWorker:
++    def __init__(self):
++        self.env = YgoEnv(omniscience=True)
++        self.obs, self.info = self.env.reset()
++        
++    def collect_rollout(self, params, agent, opponent_params, steps=256):
++        """Collecte un segment de trajectoire avec les poids actuels."""
++        states, actions, rewards, dones, log_probs, values, masks = [], [], [], [], [], [], []
++        
++        hidden_state_learner = agent.init_hidden_state(1)
++        hidden_state_opponent = agent.init_hidden_state(1)
++        
++        while len(states) < steps:
++            mask = self.env.get_action_mask()
++            current_player = self.info.get("current_player", 0)
++            
++            # S├®lectionner les bons poids et ├®tat cach├®
++            if current_player == 0:
++                current_params = params
++                current_hidden = hidden_state_learner
++            else:
++                current_params = opponent_params
++                current_hidden = hidden_state_opponent
++                
++            probs, value, next_hidden = agent.forward(current_params, current_hidden, self.obs, mask)
++            
++            if current_player == 0:
++                hidden_state_learner = next_hidden
++            else:
++                hidden_state_opponent = next_hidden
++            
++            masked_probs = probs * mask
++            masked_probs = masked_probs / (np.sum(masked_probs) + 1e-8)
++            action = np.random.choice(len(masked_probs), p=np.array(masked_probs))
++            
++            next_obs, reward, terminated, truncated, self.info = self.env.step(action)
++            done = terminated or truncated
++            
++            # On stocke uniquement les exp├®riences du point de vue de Player 0
++            if current_player == 0:
++                states.append(self.obs)
++                masks.append(mask)
++                actions.append(action)
++                rewards.append(reward)
++                dones.append(done)
++                values.append(value)
++                log_probs.append(np.log(masked_probs[action] + 1e-8))
++            
++            self.obs = next_obs
++            if done:
++                self.obs, self.info = self.env.reset()
++                hidden_state_learner = agent.init_hidden_state(1)
++                hidden_state_opponent = agent.init_hidden_state(1)
++                
++        return {
++            "states": np.array(states),
++            "masks": np.array(masks),
++            "actions": np.array(actions),
++            "rewards": np.array(rewards),
++            "dones": np.array(dones),
++            "log_probs": np.array(log_probs),
++            "values": np.array(values)
++        }
++
++def compute_gae(rollout, gamma=0.99, lam=0.95):
++    """Generalized Advantage Estimation."""
++    rewards = rollout["rewards"]
++    values = rollout["values"]
++    dones = rollout["dones"]
++    
++    advantages = np.zeros_like(rewards, dtype=np.float32)
++    lastgaelam = 0
++    # Append 0 for next value at end of rollout
++    next_values = np.append(values[1:], 0.0)
++    
++    for t in reversed(range(len(rewards))):
++        if t == len(rewards) - 1:
++            nextnonterminal = 1.0 - dones[t]
++            nextvalues = 0.0
++        else:
++            nextnonterminal = 1.0 - dones[t]
++            nextvalues = values[t+1]
++            
++        delta = rewards[t] + gamma * nextvalues * nextnonterminal - values[t]
++        advantages[t] = lastgaelam = delta + gamma * lam * nextnonterminal * lastgaelam
++        
++    returns = advantages + values
++    return advantages, returns
++
++def main():
++    print("Initialisation de Ray...")
++    ray.init(ignore_reinit_error=True)
++    
++    from ai.self_play import SelfPlayManager
++    
++    # Param├¿tres
++    num_workers = 4
++    rollout_steps = 256
++    epochs = 100
++    
++    print("Cr├®ation de l'Agent PPO et initialisation des poids JAX...")
++    temp_env = YgoEnv(omniscience=True)
++    obs_dim = temp_env.observation_space.shape[0]
++    act_dim = temp_env.action_space.n
++    print(f"Dimension des observations: {obs_dim}, Dimension des actions: {act_dim}")
++    
++    agent = PPOAgent(obs_dim=obs_dim, act_dim=act_dim)
++    key = jax.random.PRNGKey(42)
++    params = agent.init_params(key)
++    
++    # Initialiser le SelfPlayManager avec le premier checkpoint
++    manager = SelfPlayManager.remote(max_history=50)
++    ray.get(manager.add_snapshot.remote(params))
++    
++    print(f"Lancement de {num_workers} Rollout Workers...")
++    workers = [RolloutWorker.remote() for _ in range(num_workers)]
++    
++    print("D├®but de la boucle d'apprentissage RL...")
++    for epoch in range(epochs):
++        t0 = time.time()
++        
++        # Tirer un adversaire historique pour ce lot
++        opponent_params = ray.get(manager.get_opponent.remote(params))
++        
++        # 1. Collecter les donn├®es de tous les workers en parall├¿le
++        futures = [w.collect_rollout.remote(params, agent, opponent_params, rollout_steps) for w in workers]
++        rollouts = ray.get(futures)
++        
++        # 2. Concat├®ner et calculer GAE
++        all_states, all_masks, all_actions, all_adv, all_ret, all_lp, all_dones = [], [], [], [], [], [], []
++        for r in rollouts:
++            adv, ret = compute_gae(r)
++            all_states.append(r["states"])
++            all_masks.append(r["masks"])
++            all_actions.append(r["actions"])
++            all_adv.append(adv)
++            all_ret.append(ret)
++            all_lp.append(r["log_probs"])
++            all_dones.append(r["dones"])
++            
++        obs_batch = np.stack(all_states)
++        mask_batch = np.stack(all_masks).astype(bool)
++        act_batch = np.stack(all_actions)
++        adv_batch = np.stack(all_adv)
++        ret_batch = np.stack(all_ret)
++        lp_batch = np.stack(all_lp)
++        dones_batch = np.stack(all_dones)
++        
++        # 3. Mettre ├á jour le r├®seau PPO
++        params, metrics = agent.update_params(
++            params, obs_batch, mask_batch, act_batch, lp_batch, adv_batch, ret_batch, dones_batch
++        )
++        
++        fps = (num_workers * rollout_steps) / (time.time() - t0)
++        print(f"Epoch {epoch+1}/{epochs} | FPS: {fps:.1f} | Loss: {metrics['total_loss']:.4f} | Value Loss: {metrics['value_loss']:.4f}")
++        
++        # Archiver p├®riodiquement dans le SelfPlayManager
++        if (epoch + 1) % 5 == 0:
++            ray.get(manager.add_snapshot.remote(params))
++
++if __name__ == "__main__":
++    main()
+

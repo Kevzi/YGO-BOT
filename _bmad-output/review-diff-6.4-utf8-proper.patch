@@ -1,0 +1,357 @@
+﻿diff --git a/ai/distributed.py b/ai/distributed.py
+new file mode 100644
+index 0000000..0ff2266
+--- /dev/null
++++ b/ai/distributed.py
+@@ -0,0 +1,210 @@
++import ray
++import numpy as np
++import jax
++import time
++
++from core.ygoenv.env import YgoEnv
++from ai.ppo import PPOAgent
++
++def compute_gae(rollout, gamma=0.99, lam=0.95):
++    """Generalized Advantage Estimation."""
++    rewards = rollout["rewards"]
++    values = rollout["values"]
++    dones = rollout["dones"]
++    bootstrap_value = rollout.get("bootstrap_value", 0.0)
++    
++    advantages = np.zeros_like(rewards, dtype=np.float32)
++    lastgaelam = 0
++    
++    for t in reversed(range(len(rewards))):
++        if t == len(rewards) - 1:
++            nextnonterminal = 1.0 - dones[t]
++            nextvalues = bootstrap_value
++        else:
++            nextnonterminal = 1.0 - dones[t]
++            nextvalues = values[t+1]
++            
++        delta = rewards[t] + gamma * nextvalues * nextnonterminal - values[t]
++        advantages[t] = lastgaelam = delta + gamma * lam * nextnonterminal * lastgaelam
++        
++    returns = advantages + values
++    return advantages, returns
++
++@ray.remote
++class Learner:
++    """
++    Acteur central qui r├®cup├¿re les trajectoires, met ├á jour le r├®seau PPO (JAX),
++    et pousse les nouveaux poids dans le SelfPlayManager.
++    """
++    def __init__(self, parameter_server_handle, obs_dim, act_dim):
++        self.parameter_server = parameter_server_handle
++        self.agent = PPOAgent(obs_dim=obs_dim, act_dim=act_dim)
++        
++        # Initialisation des poids
++        key = jax.random.PRNGKey(42)
++        self.params = self.agent.init_params(key)
++        self.opt_state = self.agent.optimizer.init(self.params)
++        
++        # Pousser les poids initiaux
++        ray.get(self.parameter_server.set_latest_params.remote(self.params))
++        ray.get(self.parameter_server.add_snapshot.remote(self.params))
++        
++        self.updates_count = 0
++
++    def start_learning_loop(self, replay_queue, batch_size=4, epochs_per_snapshot=5):
++        """Boucle asynchrone consommant la file d'attente."""
++        print("[Learner] D├®marrage de la boucle d'apprentissage...")
++        while True:
++            # R├®cup├®rer un lot de trajectoires (on bloque jusqu'├á en avoir `batch_size`)
++            rollouts = []
++            for _ in range(batch_size):
++                rollouts.append(replay_queue.get())
++            
++            # Concat├®ner et calculer GAE
++            all_states, all_masks, all_actions, all_adv, all_ret, all_lp, all_dones = [], [], [], [], [], [], []
++            for r in rollouts:
++                adv, ret = compute_gae(r)
++                all_states.append(r["states"])
++                all_masks.append(r["masks"])
++                all_actions.append(r["actions"])
++                all_adv.append(adv)
++                all_ret.append(ret)
++                all_lp.append(r["log_probs"])
++                all_dones.append(r["dones"])
++                
++            obs_batch = np.stack(all_states)
++            mask_batch = np.stack(all_masks).astype(bool)
++            act_batch = np.stack(all_actions)
++            adv_batch = np.stack(all_adv)
++            ret_batch = np.stack(all_ret)
++            lp_batch = np.stack(all_lp)
++            dones_batch = np.stack(all_dones)
++            
++            # Mettre ├á jour le r├®seau PPO
++            self.params, self.opt_state, metrics = self.agent.update_params(
++                self.params, self.opt_state, obs_batch, mask_batch, act_batch, 
++                lp_batch, adv_batch, ret_batch, dones_batch
++            )
++            
++            self.updates_count += 1
++            
++            # Pousser les nouveaux poids de mani├¿re asynchrone (fire-and-forget)
++            self.parameter_server.set_latest_params.remote(self.params)
++            
++            # Snapshot historique
++            if self.updates_count % epochs_per_snapshot == 0:
++                self.parameter_server.add_snapshot.remote(self.params)
++                
++            # Logger les perfs (on pourrait utiliser wandb ici)
++            print(f"[Learner] Update {self.updates_count} | Loss: {metrics['total_loss']:.4f} | Value Loss: {metrics['value_loss']:.4f} | Entropy: {metrics['entropy']:.4f}")
++
++@ray.remote(num_cpus=1)
++class RolloutWorker:
++    """
++    Acteur qui joue des parties en utilisant l'environnement (CPU) et pousse
++    les trajectoires g├®n├®r├®es dans la Queue.
++    """
++    def __init__(self, parameter_server_handle, queue_handle, obs_dim, act_dim, worker_id):
++        self.parameter_server = parameter_server_handle
++        self.queue = queue_handle
++        self.worker_id = worker_id
++        
++        self.env = YgoEnv(omniscience=True)
++        self.agent = PPOAgent(obs_dim=obs_dim, act_dim=act_dim)
++
++    def start_collection_loop(self, rollout_steps=256, max_steps=10000):
++        """Boucle asynchrone de collecte de donn├®es."""
++        print(f"[Worker {self.worker_id}] D├®marrage de la boucle de collecte...")
++        obs, info = self.env.reset()
++        
++        while True:
++            # 1. R├®cup├®rer les poids les plus r├®cents ET d'un adversaire (bloquant)
++            learner_params = ray.get(self.parameter_server.get_latest_params.remote())
++            opponent_params = ray.get(self.parameter_server.get_match_params.remote())
++            
++            # 2. Collecter la trajectoire
++            trajectory = self._collect_rollout(learner_params, opponent_params, obs, info, rollout_steps, max_steps)
++            obs = trajectory["final_obs"]
++            info = trajectory["final_info"]
++            
++            # 3. Pousser dans la file (bloque si la queue est pleine, ├®vitant un OOM)
++            self.queue.put(trajectory)
++
++    def _collect_rollout(self, params, opponent_params, initial_obs, initial_info, steps, max_steps):
++        """M├®thode interne pour collecter un rollout (inspir├®e de train.py)."""
++        states, actions, rewards, dones, log_probs, values, masks = [], [], [], [], [], [], []
++        
++        hidden_state_learner = self.agent.init_hidden_state(1)
++        hidden_state_opponent = self.agent.init_hidden_state(1)
++        
++        total_env_steps = 0
++        obs = initial_obs
++        info = initial_info
++        
++        while len(states) < steps and total_env_steps < max_steps:
++            total_env_steps += 1
++            mask = self.env.get_action_mask()
++            current_player = info.get("current_player", 0)
++            
++            if current_player == 0:
++                current_params = params
++                current_hidden = hidden_state_learner
++            else:
++                current_params = opponent_params
++                current_hidden = hidden_state_opponent
++                
++            probs, value, next_hidden = self.agent.forward(current_params, current_hidden, obs, mask)
++            
++            if current_player == 0:
++                hidden_state_learner = next_hidden
++            else:
++                hidden_state_opponent = next_hidden
++            
++            masked_probs = probs * mask
++            prob_sum = np.sum(masked_probs)
++            if prob_sum == 0:
++                masked_probs = mask / (np.sum(mask) + 1e-8)
++            else:
++                masked_probs = masked_probs / prob_sum
++                
++            action = np.random.choice(len(masked_probs), p=np.array(masked_probs))
++            
++            next_obs, reward, terminated, truncated, info = self.env.step(action)
++            done = terminated or truncated
++            
++            if current_player == 0:
++                states.append(obs)
++                masks.append(mask)
++                actions.append(action)
++                rewards.append(reward)
++                dones.append(terminated)
++                values.append(value)
++                log_probs.append(np.log(masked_probs[action] + 1e-8))
++            elif done and len(rewards) > 0:
++                rewards[-1] += reward
++                dones[-1] = terminated
++            
++            obs = next_obs
++            if done:
++                obs, info = self.env.reset()
++                hidden_state_learner = self.agent.init_hidden_state(1)
++                hidden_state_opponent = self.agent.init_hidden_state(1)
++                
++        # Bootstrap
++        bootstrap_value = 0.0
++        if len(states) > 0 and not dones[-1]:
++            _, b_value, _ = self.agent.forward(params, hidden_state_learner, obs, self.env.get_action_mask())
++            bootstrap_value = float(b_value)
++                
++        return {
++            "states": np.array(states),
++            "masks": np.array(masks),
++            "actions": np.array(actions),
++            "rewards": np.array(rewards),
++            "dones": np.array(dones),
++            "log_probs": np.array(log_probs),
++            "values": np.array(values),
++            "bootstrap_value": bootstrap_value,
++            "final_obs": obs,
++            "final_info": info
++        }
+diff --git a/ai/self_play.py b/ai/self_play.py
+index 07a7e33..3c699cb 100644
+--- a/ai/self_play.py
++++ b/ai/self_play.py
+@@ -7,32 +7,37 @@ import copy
+ class SelfPlayManager:
+     """
+     Gestionnaire centralis├® pour le League Training.
+-    Stocke les snapshots historiques du mod├¿le et fournit des adversaires.
++    Stocke les snapshots historiques du mod├¿le et sert de Parameter Server pour les poids r├®cents.
+     """
+     def __init__(self, max_history=50):
+         self.history = []
+         self.max_history = max_history
++        self.latest_params = None
++
++    def set_latest_params(self, params):
++        """Met ├á jour les poids les plus r├®cents (utilis├® par le Learner)."""
++        self.latest_params = params
++
++    def get_latest_params(self):
++        """Retourne les poids les plus r├®cents (utilis├® par le Worker pour l'agent principal)."""
++        return self.latest_params
+ 
+     def add_snapshot(self, params):
+         """Ajoute un snapshot de poids dans l'historique."""
+-        # On copie profond├®ment pour ├®viter les mutations
+-        # params est un PyTree de ndarrays JAX. copy.deepcopy fonctionne g├®n├®ralement.
+-        # Mais pour ├¬tre s├╗r avec JAX, on peut juste stocker la r├®f├®rence si le Learner 
+-        # recr├®e un nouvel arbre ├á chaque update, ce qui est le cas avec optax.
+         self.history.append(params)
+         if len(self.history) > self.max_history:
+             self.history.pop(0)
+             
+         print(f"[SelfPlayManager] Snapshot ajout├®. Taille de l'historique: {len(self.history)}")
+ 
+-    def get_opponent(self, latest_params):
++    def get_match_params(self):
+         """
+         Retourne les poids d'un adversaire.
+-        50% du temps le mod├¿le le plus r├®cent (latest_params),
++        50% du temps le mod├¿le le plus r├®cent,
+         50% du temps un mod├¿le historique al├®atoire.
+         """
+         if not self.history or random.random() < 0.5:
+-            return latest_params
++            return self.latest_params
+             
+         idx = random.randint(0, len(self.history) - 1)
+         return self.history[idx]
+diff --git a/scripts/train_distributed.py b/scripts/train_distributed.py
+new file mode 100644
+index 0000000..8aa4604
+--- /dev/null
++++ b/scripts/train_distributed.py
+@@ -0,0 +1,85 @@
++import ray
++from ray.util.queue import Queue
++import time
++import sys
++import os
++
++# Ensure the root directory is in the Python path
++sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++
++from core.ygoenv.env import YgoEnv
++from ai.self_play import SelfPlayManager
++from ai.distributed import Learner, RolloutWorker
++
++def main():
++    print("Initialisation du cluster Ray...")
++    ray.init(ignore_reinit_error=True)
++    
++    # Param├¿tres d'architecture
++    num_workers = 4 # Peut ├¬tre scal├® pour Google TRC / TPU
++    queue_maxsize = 100 # Pour ├®viter un OOM de trajectoires
++    batch_size = 4 # Nombre de rollouts collect├®s avant une update PPO
++    rollout_steps = 256
++    
++    # 1. Initialiser une instance de l'environnement pour obtenir les dimensions
++    print("Analyse de l'environnement Gym...")
++    temp_env = YgoEnv(omniscience=True)
++    obs_dim = temp_env.observation_space.shape[0]
++    act_dim = temp_env.action_space.n
++    print(f"Dimension des observations: {obs_dim}, Dimension des actions: {act_dim}")
++    
++    # 2. Cr├®er le Parameter Server (SelfPlayManager)
++    print("Lancement du Parameter Server (SelfPlayManager)...")
++    manager = SelfPlayManager.remote(max_history=50)
++    
++    # 3. Cr├®er la Queue asynchrone partag├®e
++    print(f"Cr├®ation de la Queue (maxsize={queue_maxsize})...")
++    replay_queue = Queue(maxsize=queue_maxsize)
++    
++    # 4. Lancer le Learner (va s'auto-initialiser et pousser ses poids)
++    print("Lancement du Learner (GPU/Central CPU)...")
++    learner = Learner.remote(parameter_server_handle=manager, obs_dim=obs_dim, act_dim=act_dim)
++    
++    # Le Learner tourne en arri├¿re-plan
++    learner.start_learning_loop.remote(replay_queue=replay_queue, batch_size=batch_size)
++    
++    # Optionnel: on peut attendre que le Parameter Server ait re├ºu les premiers poids 
++    # avant de lancer les Workers pour ├¬tre s├╗r qu'ils ne crashent pas sur un get() vide.
++    time.sleep(2)
++    
++    # 5. Lancer les RolloutWorkers
++    print(f"Lancement de {num_workers} Rollout Workers (CPU)...")
++    workers = []
++    for i in range(num_workers):
++        worker = RolloutWorker.remote(
++            parameter_server_handle=manager, 
++            queue_handle=replay_queue, 
++            obs_dim=obs_dim, 
++            act_dim=act_dim,
++            worker_id=i
++        )
++        # Chaque worker tourne ind├®finiment
++        worker.start_collection_loop.remote(rollout_steps=rollout_steps)
++        workers.append(worker)
++        
++    print("=== Architecture Distribu├®e Lanc├®e avec Succ├¿s ===")
++    print("Le Learner et les Workers s'ex├®cutent de mani├¿re asynchrone.")
++    
++    # 6. Boucle de monitoring (Thread principal)
++    t0 = time.time()
++    try:
++        while True:
++            # R├®cup├®rer quelques m├®triques sans bloquer
++            qsize = replay_queue.size()
++            history_size = ray.get(manager.get_history_size.remote())
++            uptime = time.time() - t0
++            
++            print(f"[{uptime:.0f}s] Uptime | Queue size: {qsize}/{queue_maxsize} | Snapshots: {history_size}")
++            time.sleep(10)
++    except KeyboardInterrupt:
++        print("\nArr├¬t de l'entra├«nement distribu├® demand├®.")
++        ray.shutdown()
++        sys.exit(0)
++
++if __name__ == "__main__":
++    main()

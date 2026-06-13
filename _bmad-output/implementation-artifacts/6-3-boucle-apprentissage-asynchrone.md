@@ -35,10 +35,22 @@ So that l'agent puisse constamment affronter des versions antérieures de lui-m�
 
 **Previous Learnings:**
 - MCTS a été implémenté (`ai/mcts.py`) et l'environnement utilise `action_history` pour cloner l'état. Le MCTS peut s'avérer lent si utilisé systématiquement pour chaque pas d'entraînement sans JIT.
-- L'environnement gère désormais le mode omniscient (`omniscience=True`), ce qui lève les erreurs liées au masquage aveugle.
-- Des correctifs ont été appliqués sur les calculs de probabilité (division par zéro évitée avec `max(..., 1e-8)`) et l'application stricte du `action_mask`.
+## Review Findings
 
-## Dev Agent Record
+- [x] [Review][Patch] Missing Terminal Rewards from Opponent Turns [scripts/train.py]
+- [x] [Review][Patch] Flawed Truncation Handling / GAE Bootstrapping [scripts/train.py]
+- [x] [Review][Patch] Zero Probability / Underflow Crash in Action Masking [scripts/train.py]
+- [x] [Review][Patch] Opponent evaluates observations from the wrong perspective [scripts/train.py]
+- [x] [Review][Patch] NoneType iteration crash in `env.py` [core/ygoenv/env.py]
+- [x] [Review][Patch] Infinite Loop Risk in Rollouts [scripts/train.py]
+- [x] [Review][Patch] Dead Code in GAE Calculation [scripts/train.py]
+- [x] [Review][Defer] Inaccurate FPS Metrics [scripts/train.py] — deferred, pre-existing
+- [x] [Review][Defer] Resource Leaks (env.close()) [scripts/train.py] — deferred, pre-existing
+- [x] [Review][Defer] Naïve State Stacking for Recurrent Networks [scripts/train.py] — deferred, pre-existing
+- [x] [Review][Defer] Brittle Path Injection [scripts/train.py] — deferred, pre-existing
+- [x] [Review][Defer] Hardcoded Randomness [scripts/train.py] — deferred, pre-existing
+
+## Dev Notes
 
 **Implementation Plan:**
 

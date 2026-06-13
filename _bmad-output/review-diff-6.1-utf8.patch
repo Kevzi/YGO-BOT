@@ -1,0 +1,390 @@
+﻿diff --git a/ai/ppo.py b/ai/ppo.py
+index ed0c1e7..66ff1d1 100644
+--- a/ai/ppo.py
++++ b/ai/ppo.py
+@@ -1,101 +1,68 @@
+ import jax
+ import jax.numpy as jnp
++import optax
++from ai.network import ActorCriticLSTM, init_hidden_state
+ 
+ class PPOAgent:
+-    def __init__(self, obs_dim: int, act_dim: int, hidden_dim: int = 64):
++    def __init__(self, obs_dim: int, act_dim: int, hidden_dim: int = 512, learning_rate: float = 3e-4):
+         assert obs_dim > 0 and act_dim > 0 and hidden_dim > 0, "Dimensions must be strictly positive"
+         self.obs_dim = obs_dim
+         self.act_dim = act_dim
+         self.hidden_dim = hidden_dim
+         
+-    def init_hidden_state(self, batch_size: int) -> tuple[jnp.ndarray, jnp.ndarray]:
+-        """Initialise l'état caché (h, c) pour un batch de séquences."""
+-        return (jnp.zeros((batch_size, self.hidden_dim), dtype=jnp.float32), 
+-                jnp.zeros((batch_size, self.hidden_dim), dtype=jnp.float32))
+-
+-    def init_params(self, rng: jax.random.PRNGKey) -> dict:
+-        """Initialise les poids du réseau de neurones en JAX pur."""
+-        keys = jax.random.split(rng, 5)
+-        
+-        glorot_init = jax.nn.initializers.glorot_uniform()
+-        zeros_init = jax.nn.initializers.zeros
++        self.model = ActorCriticLSTM(act_dim=act_dim, hidden_dim=hidden_dim)
++        self.optimizer = optax.adam(learning_rate)
+         
+-        # Feature Extractor (shared MLP before LSTM)
+-        w1_f = glorot_init(keys[0], (self.obs_dim, self.hidden_dim), dtype=jnp.float32)
+-        b1_f = zeros_init(keys[1], (self.hidden_dim,), dtype=jnp.float32)
+-        
+-        # LSTM layer (takes feature + h_prev -> 4 * hidden_dim)
+-        lstm_w_i = glorot_init(keys[2], (self.hidden_dim, 4 * self.hidden_dim), dtype=jnp.float32)
+-        lstm_w_h = glorot_init(keys[3], (self.hidden_dim, 4 * self.hidden_dim), dtype=jnp.float32)
+-        lstm_b = zeros_init(keys[4], (4 * self.hidden_dim,), dtype=jnp.float32)
+-
+-        # Split keys for policy and value heads
+-        keys_heads = jax.random.split(keys[0], 4)
+-        
+-        # Policy Head
+-        w_p = glorot_init(keys_heads[0], (self.hidden_dim, self.act_dim), dtype=jnp.float32)
+-        b_p = zeros_init(keys_heads[1], (self.act_dim,), dtype=jnp.float32)
+-        
+-        # Value Head
+-        w_v = glorot_init(keys_heads[2], (self.hidden_dim, 1), dtype=jnp.float32)
+-        b_v = zeros_init(keys_heads[3], (1,), dtype=jnp.float32)
+-        
+-        return {
+-            "feature": {"w": w1_f, "b": b1_f},
+-            "lstm": {"w_i": lstm_w_i, "w_h": lstm_w_h, "b": lstm_b},
+-            "policy": {"w": w_p, "b": b_p},
+-            "value": {"w": w_v, "b": b_v}
+-        }
++    def init_hidden_state(self, batch_size: int) -> tuple[jnp.ndarray, jnp.ndarray]:
++        """Initialise l'état caché (h, c) pour un batch."""
++        return init_hidden_state(batch_size, self.hidden_dim)
+ 
+-    def _lstm_step(self, params: dict, hidden_state: tuple[jnp.ndarray, jnp.ndarray], x: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+-        """Exécute une étape LSTM. x: (batch, hidden_dim), hidden_state: (h, c)."""
+-        h, c = hidden_state
+-        
+-        lstm_params = params["lstm"]
+-        # W_i * x + W_h * h + b
+-        gates = jnp.dot(x, lstm_params["w_i"]) + jnp.dot(h, lstm_params["w_h"]) + lstm_params["b"]
+-        
+-        # i, f, o, g
+-        i, f, o, g = jnp.split(gates, 4, axis=-1)
+-        
+-        i = jax.nn.sigmoid(i)
+-        f = jax.nn.sigmoid(f)
+-        o = jax.nn.sigmoid(o)
+-        g = jax.nn.tanh(g)
++    def init_params(self, rng: jax.random.PRNGKey) -> tuple[dict, optax.OptState]:
++        """Initialise les poids du modèle Flax et l'état de l'optimiseur."""
++        dummy_obs = jnp.zeros((1, self.obs_dim), dtype=jnp.float32)
++        dummy_mask = jnp.zeros((1, self.act_dim), dtype=jnp.bool_)
++        dummy_carry = self.init_hidden_state(1)
+         
+-        c_new = f * c + i * g
+-        h_new = o * jax.nn.tanh(c_new)
++        variables = self.model.init(rng, dummy_carry, dummy_obs, dummy_mask)
++        params = variables['params']
+         
+-        return (h_new, c_new), h_new
++        opt_state = self.optimizer.init(params)
++        return params, opt_state
+ 
+-    def forward(self, params: dict, hidden_state: tuple[jnp.ndarray, jnp.ndarray], obs: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray, tuple[jnp.ndarray, jnp.ndarray]]:
++    def forward(self, params: dict, hidden_state: tuple[jnp.ndarray, jnp.ndarray], obs: jnp.ndarray, action_mask: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray, tuple[jnp.ndarray, jnp.ndarray]]:
+         """Forward pass public pour l'inférence. Retourne les probabilités, la Value et le nouvel état caché."""
+         if obs.ndim not in (1, 2):
+             raise ValueError(f"Invalid observation shape: {obs.shape}. Expected 1D or 2D array.")
+             
++        if action_mask.ndim not in (1, 2):
++            raise ValueError(f"Invalid action_mask shape: {action_mask.shape}. Expected 1D or 2D array.")
++            
++        action_mask = jnp.asarray(action_mask, dtype=jnp.bool_)
++        
+         is_single = obs.ndim == 1
+         if is_single:
+             obs = jnp.expand_dims(obs, axis=0)
++            action_mask = jnp.expand_dims(action_mask, axis=0)
++            
++        if obs.shape[0] != action_mask.shape[0]:
++            raise ValueError(f"Batch size mismatch: obs {obs.shape[0]} != action_mask {action_mask.shape[0]}")
+             
+-        # Extract features
+-        x = jnp.maximum(0, jnp.dot(obs, params["feature"]["w"]) + params["feature"]["b"])
++        # Ensure at least one valid action to avoid softmax over all -1e9 (which gives uniform distribution)
++        action_mask = jnp.where(~jnp.any(action_mask, axis=-1, keepdims=True), True, action_mask)
+         
+-        # LSTM Step
+-        next_hidden_state, h_new = self._lstm_step(params, hidden_state, x)
++        # Inférence avec le module Flax
++        next_hidden_state, logits, value = self.model.apply({'params': params}, hidden_state, obs, action_mask)
+         
+-        # Policy & Value heads
+-        logits = jnp.dot(h_new, params["policy"]["w"]) + params["policy"]["b"]
+         probs = jax.nn.softmax(logits, axis=-1)
+         
+-        value = jnp.dot(h_new, params["value"]["w"]) + params["value"]["b"]
+-        
+         if is_single:
+             return probs[0], value[0, 0], next_hidden_state
+         return probs, value[..., 0], next_hidden_state
+ 
+-    def _forward_sequence(self, params: dict, obs_seq: jnp.ndarray, dones_seq: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
++    def _forward_sequence(self, params: dict, obs_seq: jnp.ndarray, mask_seq: jnp.ndarray, dones_seq: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+         """Calcul de la séquence complète pour BPTT via jax.lax.scan.
+         obs_seq: (batch, time, obs_dim)
++        mask_seq: (batch, time, act_dim)
+         dones_seq: (batch, time)
+         """
+         if obs_seq.shape[1] == 0:
+@@ -103,40 +70,36 @@ class PPOAgent:
+             return (jnp.zeros((batch_size, 0, self.act_dim)), 
+                     jnp.zeros((batch_size, 0)))
+                     
++        if obs_seq.shape[:2] != mask_seq.shape[:2]:
++            raise ValueError(f"Sequence shape mismatch: obs {obs_seq.shape[:2]} != mask {mask_seq.shape[:2]}")
++            
+         batch_size = obs_seq.shape[0]
+         init_state = self.init_hidden_state(batch_size)
+         
+         def scan_fn(carry, step_inputs):
+             h, c = carry
+-            obs_t, done_t = step_inputs
++            obs_t, mask_t, done_t = step_inputs
+             
+             # Reset hidden state where episode ended in previous step
+             done_t = jnp.expand_dims(done_t, axis=-1)
+             h = h * (1.0 - done_t)
+             c = c * (1.0 - done_t)
++            carry = (h, c)
+             
+-            # Feature extraction
+-            x = jnp.maximum(0, jnp.dot(obs_t, params["feature"]["w"]) + params["feature"]["b"])
++            # Inférence Flax
++            new_carry, logits, value = self.model.apply({'params': params}, carry, obs_t, mask_t)
+             
+-            # LSTM step
+-            (h_new, c_new), h_out = self._lstm_step(params, (h, c), x)
+-            
+-            # Heads
+-            logits = jnp.dot(h_out, params["policy"]["w"]) + params["policy"]["b"]
+-            value = jnp.dot(h_out, params["value"]["w"]) + params["value"]["b"]
+-            
+-            return (h_new, c_new), (logits, value[..., 0])
++            return new_carry, (logits, value[..., 0])
+ 
+         # Swap batch and time axes for scan: (time, batch, ...)
+         obs_seq_t = jnp.swapaxes(obs_seq, 0, 1)
++        mask_seq_t = jnp.swapaxes(mask_seq, 0, 1)
+         dones_seq_t = jnp.swapaxes(dones_seq, 0, 1)
+         
+         # Padding dones to shift it by 1 step (reset state on step AFTER done)
+-        # dones_seq_t has shape (time, batch).
+-        # We want to reset AT step t if done was true at step t-1.
+         dones_shifted = jnp.concatenate([jnp.zeros((1, batch_size), dtype=jnp.float32), dones_seq_t[:-1]], axis=0)
+ 
+-        _, (logits_seq_t, value_seq_t) = jax.lax.scan(scan_fn, init_state, (obs_seq_t, dones_shifted))
++        _, (logits_seq_t, value_seq_t) = jax.lax.scan(scan_fn, init_state, (obs_seq_t, mask_seq_t, dones_shifted))
+         
+         # Swap back to (batch, time, ...)
+         logits_seq = jnp.swapaxes(logits_seq_t, 0, 1)
+@@ -144,17 +107,21 @@ class PPOAgent:
+         
+         return logits_seq, value_seq
+ 
+-    def compute_loss(self, params: dict, obs: jnp.ndarray, actions: jnp.ndarray, 
++    def compute_loss(self, params: dict, obs: jnp.ndarray, action_masks: jnp.ndarray, actions: jnp.ndarray, 
+                     old_log_probs: jnp.ndarray, advantages: jnp.ndarray, returns: jnp.ndarray,
+                     dones: jnp.ndarray,
+                     clip_ratio: float = 0.2, value_coef: float = 1.0, entropy_coef: float = 0.01) -> tuple[jnp.ndarray, dict]:
+         """Calcule la perte PPO avec BPTT sur une séquence temporelle."""
+         assert obs.ndim == 3, "obs must have shape (batch, time, dim)"
+         
++        action_masks = jnp.asarray(action_masks, dtype=jnp.bool_)
++        # Ensure at least one valid action across the sequence to avoid NaNs
++        action_masks = jnp.where(~jnp.any(action_masks, axis=-1, keepdims=True), True, action_masks)
++        
+         actions = jnp.clip(actions, 0, self.act_dim - 1)
+         
+         # Unroll sequence
+-        logits_seq, values_seq = self._forward_sequence(params, obs, dones)
++        logits_seq, values_seq = self._forward_sequence(params, obs, action_masks, dones)
+         
+         log_probs_all = jax.nn.log_softmax(logits_seq, axis=-1)
+         # Advanced indexing to get log_probs of chosen actions
+@@ -173,7 +140,9 @@ class PPOAgent:
+         value_loss = jnp.mean((values_seq - returns) ** 2)
+         
+         probs = jax.nn.softmax(logits_seq, axis=-1)
+-        entropy = -jnp.mean(jnp.sum(probs * log_probs_all, axis=-1))
++        # Ne calculer l'entropie que sur les actions valides (logits != -1e9)
++        safe_probs = jnp.where(action_masks, jnp.maximum(probs, 1e-10), 1e-10)
++        entropy = -jnp.mean(jnp.sum(probs * jnp.log(safe_probs), axis=-1))
+         
+         total_loss = policy_loss + value_coef * value_loss - entropy_coef * entropy
+         
+@@ -185,16 +154,16 @@ class PPOAgent:
+         
+         return total_loss, metrics
+ 
+-    def update_params(self, params: dict, obs: jnp.ndarray, actions: jnp.ndarray, 
++    def update_params(self, params: dict, opt_state: optax.OptState, obs: jnp.ndarray, action_masks: jnp.ndarray, actions: jnp.ndarray, 
+                     old_log_probs: jnp.ndarray, advantages: jnp.ndarray, returns: jnp.ndarray,
+-                    dones: jnp.ndarray,
+-                    learning_rate: float = 3e-4) -> tuple[dict, dict]:
+-        """Mise à jour BPTT des paramètres avec SGD."""
++                    dones: jnp.ndarray) -> tuple[dict, optax.OptState, dict]:
++        """Mise à jour BPTT des paramètres avec Optax."""
+         loss_fn = jax.value_and_grad(self.compute_loss, has_aux=True)
+-        (loss, metrics), grads = loss_fn(params, obs, actions, old_log_probs, advantages, returns, dones)
++        (loss, metrics), grads = loss_fn(params, obs, action_masks, actions, old_log_probs, advantages, returns, dones)
+         
+-        new_params = jax.tree_util.tree_map(lambda p, g: p - learning_rate * g, params, grads)
++        # Optax update
++        updates, new_opt_state = self.optimizer.update(grads, opt_state, params)
++        new_params = optax.apply_updates(params, updates)
+         
+         metrics["total_loss"] = loss
+-        return new_params, metrics
+-
++        return new_params, new_opt_state, metrics
+diff --git a/pyproject.toml b/pyproject.toml
+index 5dc5a70..b7f2321 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -12,6 +12,8 @@ fastapi = "^0.100.0"
+ uvicorn = "^0.23.0"
+ jax = "^0.4.13"
+ jaxlib = "^0.4.13"
++flax = "^0.7.2"
++optax = "^0.1.7"
+ ray = "^2.6.0"
+ sqlalchemy = "^2.0.0"
+ alembic = "^1.11.0"
+diff --git a/ai/network.py b/ai/network.py
+new file mode 100644
+index 0000000..6192090
+--- /dev/null
++++ b/ai/network.py
+@@ -0,0 +1,55 @@
++import jax.numpy as jnp
++import flax.linen as nn
++
++class ActorCriticLSTM(nn.Module):
++    """
++    Réseau de neurones Actor-Critic avec LSTM pour PPO.
++    Prend en charge l'observation de 60694 dimensions, compresse avec un encodeur,
++    maintient un état de croyance (belief state) via un LSTM,
++    et masque les actions illégales.
++    """
++    act_dim: int = 200
++    hidden_dim: int = 512
++
++    @nn.compact
++    def __call__(self, carry: tuple[jnp.ndarray, jnp.ndarray], obs: jnp.ndarray, action_mask: jnp.ndarray):
++        """
++        Inférence sur un seul pas de temps (single step).
++        
++        Args:
++            carry: Tuple d'états cachés (h, c) pour le LSTM.
++            obs: Tenseur d'observations de forme (batch, obs_dim).
++            action_mask: Tenseur booléen de forme (batch, act_dim).
++            
++        Returns:
++            new_carry: Tuple mis à jour (h', c').
++            logits: Les probabilités brutes d'actions (avant softmax) avec masking.
++            value: La valeur estimée de l'état (critic).
++        """
++        # 1. Encodeur Spatial (Feature Extractor)
++        # Compresse l'immense vecteur d'observation
++        x = nn.Dense(self.hidden_dim, name="encoder")(obs)
++        x = nn.relu(x)
++        
++        # 2. Cœur Récurrent (LSTM - Belief State)
++        # Mémorise les informations cachées et le contexte passé
++        lstm_cell = nn.LSTMCell(features=self.hidden_dim, name="lstm")
++        new_carry, h_out = lstm_cell(carry, x)
++        
++        # 3. Têtes de sortie (Heads)
++        # Tête Critique (Value)
++        value = nn.Dense(1, name="critic")(h_out)
++        
++        # Tête Acteur (Policy Logits)
++        logits = nn.Dense(self.act_dim, name="actor")(h_out)
++        
++        # Action Masking : appliquer -1e9 aux actions illégales avant le Softmax
++        # JAX `where` utilise le masque (True = légal, False = illégal)
++        logits = jnp.where(action_mask, logits, -1e9)
++        
++        return new_carry, logits, value
++
++def init_hidden_state(batch_size: int, hidden_dim: int = 512) -> tuple[jnp.ndarray, jnp.ndarray]:
++    """Initialise l'état caché (h, c) du LSTM pour un batch."""
++    return (jnp.zeros((batch_size, hidden_dim), dtype=jnp.float32),
++            jnp.zeros((batch_size, hidden_dim), dtype=jnp.float32))
+diff --git a/tests/test_flax_ppo.py b/tests/test_flax_ppo.py
+new file mode 100644
+index 0000000..0c01434
+--- /dev/null
++++ b/tests/test_flax_ppo.py
+@@ -0,0 +1,60 @@
++import jax
++import jax.numpy as jnp
++from ai.ppo import PPOAgent
++
++def test_flax_ppo_forward():
++    print("Initialisation de PPOAgent avec Flax...")
++    batch_size = 2
++    seq_length = 5
++    obs_dim = 60694
++    act_dim = 200
++    hidden_dim = 512
++    
++    agent = PPOAgent(obs_dim=obs_dim, act_dim=act_dim, hidden_dim=hidden_dim)
++    
++    rng = jax.random.PRNGKey(42)
++    params, opt_state = agent.init_params(rng)
++    print("Poids initialisés avec succès.")
++    
++    print("\n--- Test Forward Single Step ---")
++    dummy_obs = jnp.zeros((batch_size, obs_dim), dtype=jnp.float32)
++    # Masking: all true except the first element of batch is false for action 0
++    dummy_mask = jnp.ones((batch_size, act_dim), dtype=jnp.bool_)
++    dummy_mask = dummy_mask.at[0, 0].set(False)
++    
++    hidden_state = agent.init_hidden_state(batch_size)
++    
++    probs, value, next_hidden = agent.forward(params, hidden_state, dummy_obs, dummy_mask)
++    print("Forward pass exécuté avec succès.")
++    print(f"Shape Probs: {probs.shape} (Attendu: (2, 200))")
++    print(f"Shape Value: {value.shape} (Attendu: (2,))")
++    print(f"Probabilité de l'action interdite (batch 0, action 0): {probs[0, 0]:.6f} (Attendu: 0.000000)")
++    print(f"Probabilité d'une action légale (batch 0, action 1): {probs[0, 1]:.6f}")
++    
++    print("\n--- Test Forward Sequence (BPTT) ---")
++    dummy_obs_seq = jnp.zeros((batch_size, seq_length, obs_dim), dtype=jnp.float32)
++    dummy_mask_seq = jnp.ones((batch_size, seq_length, act_dim), dtype=jnp.bool_)
++    dummy_dones_seq = jnp.zeros((batch_size, seq_length), dtype=jnp.bool_)
++    # On met un done à la frame 2 pour tester le reset
++    dummy_dones_seq = dummy_dones_seq.at[0, 2].set(True)
++    
++    logits_seq, value_seq = agent._forward_sequence(params, dummy_obs_seq, dummy_mask_seq, dummy_dones_seq)
++    print("Forward sequence exécuté avec succès.")
++    print(f"Shape Logits Seq: {logits_seq.shape} (Attendu: (2, 5, 200))")
++    print(f"Shape Value Seq: {value_seq.shape} (Attendu: (2, 5))")
++    
++    print("\n--- Test Compute Loss & Update Params ---")
++    actions = jnp.zeros((batch_size, seq_length), dtype=jnp.int32)
++    old_log_probs = jnp.zeros((batch_size, seq_length), dtype=jnp.float32)
++    advantages = jnp.ones((batch_size, seq_length), dtype=jnp.float32)
++    returns = jnp.ones((batch_size, seq_length), dtype=jnp.float32)
++    
++    loss, metrics = agent.compute_loss(params, dummy_obs_seq, dummy_mask_seq, actions, old_log_probs, advantages, returns, dummy_dones_seq)
++    print(f"Loss calculée: {loss}")
++    
++    new_params, new_opt_state, update_metrics = agent.update_params(params, opt_state, dummy_obs_seq, dummy_mask_seq, actions, old_log_probs, advantages, returns, dummy_dones_seq)
++    print("Mise à jour des poids Optax réussie.")
++    print("Test complet réussi ! 🎉")
++
++if __name__ == "__main__":
++    test_flax_ppo_forward()

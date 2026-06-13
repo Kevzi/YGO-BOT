@@ -83,6 +83,14 @@ Doter l'IA de la capacité d'anticiper plusieurs tours à l'avance, de se souven
 Permettre au joueur/chercheur de charger n'importe quel deck méta depuis des sources externes pour tester le bot contre des stratégies spécifiques.
 **FRs covered:** FR-4.1, FR-4.2
 
+### Epic 5: Mise à l'échelle de l'Environnement (Architecture Avancée)
+Refonte et optimisation de l'environnement Gym (ygoenv) pour permettre à l'agent PPO de comprendre l'intégralité du jeu (Espace d'Actions et Observation Space), et résoudre les blocages complexes du moteur C++.
+**FRs covered:** FR-5.1, FR-5.2, FR-5.3, FR-5.4
+
+### Epic 6: Intelligence Artificielle et Planification (Deep RL)
+Connecter l'environnement à un modèle JAX complet capable d'apprendre par lui-même (Self-Play) en respectant les actions légales, en retenant l'information cachée via LSTM, en planifiant avec MCTS et en s'entraînant massivement via Ray.
+**FRs covered:** FR-6.1, FR-6.2, FR-6.3, FR-6.4
+
 ## Epic 1: La Fondation du Sparring-Partner (Jouable en local)
 
 Permettre à un joueur de se connecter à l'IA via un client (Omega/Neos) et de lancer un duel où le bot répond avec des coups 100% légaux.
@@ -278,3 +286,134 @@ So that l'environnement Python reçoive systématiquement une liste d'IDs entier
 **When** FastAPI délègue la requête de conversion au microservice local `omega-api-decks`
 **Then** le microservice le décode et FastAPI extrait les passcodes (Main/Extra/Side)
 **And** la liste d'IDs validée est injectée pour initialiser correctement le deck de l'agent dans l'environnement Gym (`ygoenv`).
+
+## Epic 5: Mise à l'échelle de l'Environnement (Architecture Avancée)
+
+Refonte et optimisation de l'environnement Gym (ygoenv) pour permettre à l'agent PPO de comprendre l'intégralité du jeu (Espace d'Actions et Observation Space), et résoudre les blocages complexes du moteur C++.
+
+### Story 5.1: Espace d'Actions Discretisé (200 actions statiques)
+
+As a Chercheur en IA,
+I want d'abandonner l'espace d'actions dynamique au profit d'un espace discretisé fixe (`Discrete(200)`),
+So that le réseau de neurones PPO puisse projeter ses probabilités d'actions sur des neurones de sortie statiques (Action Masking).
+
+**Acceptance Criteria:**
+
+**Given** l'initialisation de l'environnement
+**When** on interroge `env.action_space`
+**Then** il retourne un `spaces.Discrete(200)`
+**And** les actions générées par le moteur C++ (Invocations, Poses, Activations, Battle) sont mappées de manière déterministe sur les 200 slots sémantiques.
+
+### Story 5.2: Auto-complétion et Ciblage Dynamique (MSG_SELECT_CARD)
+
+As a Chercheur en IA,
+I want que l'environnement puisse gérer dynamiquement les requêtes de ciblage (MSG_SELECT_CARD),
+So that l'agent ne reste pas bloqué indéfiniment lorsqu'il doit choisir la cible d'une attaque ou d'un effet complexe.
+
+**Acceptance Criteria:**
+
+**Given** un effet ou une attaque nécessitant un ciblage
+**When** le moteur ocgcore renvoie `MSG_SELECT_CARD` avec une liste de cibles légales
+**Then** l'environnement Gym permet à l'agent d'utiliser les slots 191 à 199 pour choisir une cible parmi la liste
+**And** si plusieurs cibles sont requises, l'environnement boucle avec le C++ pour auto-compléter la sélection sans crasher.
+
+### Story 5.3: Observation Complète à 156 Slots (Brouillard de Guerre)
+
+As a Chercheur en IA,
+I want que l'observation de l'agent passe à une représentation matricielle complète du jeu (156 emplacements pour les deux joueurs) incluant un brouillard de guerre,
+So that l'agent puisse percevoir tout le terrain, sa main, les cimetières, et "cacher" les informations privées de l'adversaire (cartes face cachée, main).
+
+**Acceptance Criteria:**
+
+**Given** le calcul de l'observation à chaque étape
+**When** `env.step()` ou `env.reset()` est appelé
+**Then** l'environnement construit un tenseur `(60694,)` concaténant 156 slots sémantiques et un vecteur d'information globale (LP, Phase)
+**And** les caractéristiques et embeddings des cartes cachées ou adverses non publiques sont masqués par des zéros.
+
+### Story 5.4: Entraînement de l'Agent PPO avec Masquage d'Actions (Action Masking)
+
+As a Chercheur en IA,
+I want d'entraîner le modèle PPO en utilisant le masque d'actions (Action Mask) généré par l'environnement,
+So that le réseau apprenne à attribuer 0% de probabilité aux actions illégales, évitant ainsi le gaspillage d'exploration et accélérant l'apprentissage des conditions de victoire.
+
+**Acceptance Criteria:**
+
+**Given** le lot d'observations renvoyé par Gym
+**When** le PPO met à jour ses poids
+**Then** il pénalise la prédiction d'actions illégales à l'aide d'un gradient "Action Masking"
+**And** la Value Loss et l'Entropy démontrent que l'agent apprend à explorer uniquement les actions valides.
+
+## Epic 6: Intelligence Artificielle et Planification (Deep RL)
+
+Connecter l'environnement à un modèle JAX complet capable d'apprendre par lui-même (Self-Play) en respectant les actions légales, en retenant l'information cachée via LSTM, en planifiant avec MCTS et en s'entraînant massivement via Ray.
+
+### Story 6.1: Intégration LSTM et État de Croyance (Belief State)
+
+As a Chercheur en IA,
+I want d'intégrer des couches LSTM au sein de la politique PPO sous JAX,
+So that l'agent puisse traiter la séquence temporelle de l'observation (60694 dimensions) pour construire un état de croyance (belief state) et se souvenir des cartes cachées ou tutorisées par l'adversaire (bluff).
+
+**Acceptance Criteria:**
+
+**Given** un tenseur d'observation masqué par le brouillard de guerre
+**When** l'agent LSTM traite la séquence temporelle des observations et des actions passées
+**Then** le réseau maintient et met à jour un "hidden state" persistant
+**And** l'agent utilise efficacement la mémoire à court/long terme pour prendre des décisions face à des informations incomplètes (POMDP).
+
+### Review Findings
+
+- [x] [Review][Patch] Sequence Processing Bottleneck [ai/ppo.py]
+- [x] [Review][Patch] Missing Gradient Clipping [ai/ppo.py]
+- [x] [Review][Patch] Fake Tests [tests/test_flax_ppo.py]
+- [x] [Review][Patch] Careless Type Coercion / Dtypes [ai/ppo.py]
+- [x] [Review][Patch] Unsafe Single-Batch Dimensions [ai/ppo.py]
+- [x] [Review][Patch] Fragile Entropy Calculation [ai/ppo.py]
+- [x] [Review][Patch] Optimizer Edge Cases [ai/ppo.py]
+- [x] [Review][Patch] Shape Mismatches in Environment Processing [ai/ppo.py]
+- [x] [Review][Patch] Missing Past Actions in LSTM Input [ai/network.py]
+- [x] [Review][Patch] Missing Return Type Hints [ai/network.py]
+- [x] [Review][Defer] Brittle Shared Network Topology [ai/ppo.py] — deferred, pre-existing
+- [x] [Review][Defer] Masking Critical Environment Bugs [ai/ppo.py] — deferred, pre-existing
+- [x] [Review][Defer] Dangerous Magic Numbers [ai/network.py] — deferred, pre-existing
+- [x] [Review][Defer] Rigid Optimizer Configuration [ai/ppo.py] — deferred, pre-existing
+- [x] [Review][Defer] Naive Massive Dense Layer [ai/network.py] — deferred, pre-existing
+
+### Story 6.2: Recherche Arborescente MCTS (Gumbel AlphaZero)
+
+As a Chercheur en IA,
+I want d'intégrer un algorithme MCTS (Gumbel AlphaZero) pour guider le réseau de neurones,
+So that l'agent puisse planifier et anticiper les coups futurs au-delà d'une réaction myope à l'instant t.
+
+**Acceptance Criteria:**
+
+**Given** la phase d'entraînement en Self-Play
+**When** le MCTS est configuré en mode d'omniscience
+**Then** le MCTS voit les cartes cachées pour simuler l'arbre des possibles très rapidement et guider le réseau
+**And** en partie réelle (inférence), le bot utilise un Information Set MCTS (IS-MCTS) ou s'appuie sur la politique PPO guidée pour réagir aux états cachés.
+
+### Story 6.3: Boucle d'Apprentissage Asynchrone (Self-Play)
+
+As a Chercheur en IA,
+I want de mettre en place une boucle d'auto-jeu asynchrone (Self-Play),
+So that l'agent puisse constamment affronter des versions antérieures de lui-même et collecter des trajectoires pour améliorer continuellement sa stratégie et éviter d'exploiter un adversaire aléatoire.
+
+**Acceptance Criteria:**
+
+**Given** l'exécution du script `scripts/train.py`
+**When** les environnements parallèles sont lancés
+**Then** les agents jouent asynchronement contre des itérations passées de leur propre modèle
+**And** les trajectoires générées mettent à jour les poids du réseau JAX PPO de manière stable sans s'enfermer dans un optimum local trivial.
+
+### Story 6.4: Distribution Massive et League Training via Ray
+
+As a Chercheur en IA / DevOps,
+I want de déployer notre boucle d'entraînement via le framework Ray,
+So that l'apprentissage puisse passer à l'échelle sur des clusters multi-GPU et multi-cœurs (League Training), gérant l'espace d'états gigantesque de Yu-Gi-Oh!.
+
+**Acceptance Criteria:**
+
+**Given** le besoin d'augmenter drastiquement le nombre de parties simulées
+**When** le script de déploiement est lancé via le cluster Ray
+**Then** Ray orchestre la distribution des calculs, équilibrant la charge des différents acteurs MCTS et du Learner central
+**And** le League Training gère dynamiquement plusieurs pools de versions d'agents (decks méta, historiques, etc.) sans goulot d'étranglement mémoire.
+

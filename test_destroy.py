@@ -1,0 +1,18 @@
+import sys; sys.path.append('.')
+from core.ygoenv.wrapper import YgoEngine
+import struct
+e = YgoEngine()
+print('create_duel', flush=True)
+e.create_duel()
+print(f'duel_ptr after create: {e.duel_ptr.value}', flush=True)
+print('add_card', flush=True)
+for i in range(40): e.add_card(89631139, 0, 1, i, 8)
+for i in range(40): e.add_card(89631139, 1, 1, i, 8)
+print('start_duel', flush=True)
+e.start_duel()
+print('get_legal_actions 1', flush=True)
+e.get_legal_actions({})
+print(f'duel_ptr before destroy: {e.duel_ptr.value}', flush=True)
+print('destroy_duel', flush=True)
+e.destroy_duel()
+print('DONE', flush=True)

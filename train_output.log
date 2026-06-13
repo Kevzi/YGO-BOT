@@ -1,0 +1,33 @@
+Initialisation de Ray...
+2026-06-13 03:20:16,011	INFO worker.py:2012 -- Started a local Ray instance.
+/mnt/c/Users/kevin/Downloads/Projet code/ygo bot/.venv_wsl/lib/python3.12/site-packages/ray/_private/worker.py:2051: FutureWarning: Tip: In future versions of Ray, Ray will no longer override accelerator visible devices env var if num_gpus=0 or num_gpus=None (default). To enable this behavior and turn off this error message, set RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
+  warnings.warn(
+Création de l'Agent PPO et initialisation des poids JAX...
+Dimension des observations: 5760, Dimension des actions: 200
+WARNING:jax._src.xla_bridge:An NVIDIA GPU may be present on this machine, but a CUDA-enabled jaxlib is not installed. Falling back to cpu.
+Lancement de 4 Rollout Workers...
+Début de la boucle d'apprentissage RL...
+[36m(RolloutWorker pid=21835)[0m WARNING:jax._src.xla_bridge:An NVIDIA GPU may be present on this machine, but a CUDA-enabled jaxlib is not installed. Falling back to cpu.
+Epoch 1/100 | FPS: 110.0 | Loss: -0.0530 | Value Loss: 0.0000
+Epoch 2/100 | FPS: 922.0 | Loss: -0.0530 | Value Loss: 0.0000
+Epoch 3/100 | FPS: 924.6 | Loss: -0.0530 | Value Loss: 0.0000
+Epoch 4/100 | FPS: 949.7 | Loss: -0.0530 | Value Loss: 0.0000
+Epoch 5/100 | FPS: 1037.5 | Loss: -0.0530 | Value Loss: 0.0000
+Epoch 6/100 | FPS: 968.3 | Loss: -0.0530 | Value Loss: 0.0000
+Epoch 7/100 | FPS: 956.3 | Loss: -0.0530 | Value Loss: 0.0000
+Epoch 8/100 | FPS: 975.7 | Loss: -0.0530 | Value Loss: 0.0000
+Epoch 9/100 | FPS: 884.7 | Loss: -0.0530 | Value Loss: 0.0000
+Epoch 10/100 | FPS: 951.5 | Loss: -0.0530 | Value Loss: 0.0000
+Epoch 11/100 | FPS: 971.3 | Loss: -0.0530 | Value Loss: 0.0000
+Epoch 12/100 | FPS: 888.0 | Loss: -0.0530 | Value Loss: 0.0000
+Epoch 13/100 | FPS: 1087.6 | Loss: -0.0530 | Value Loss: 0.0000
+Epoch 14/100 | FPS: 1030.4 | Loss: -0.0530 | Value Loss: 0.0000
+Epoch 15/100 | FPS: 1080.5 | Loss: -0.0530 | Value Loss: 0.0000
+Epoch 16/100 | FPS: 905.9 | Loss: -0.0530 | Value Loss: 0.0000
+Epoch 17/100 | FPS: 859.0 | Loss: -0.0530 | Value Loss: 0.0000
+Epoch 18/100 | FPS: 940.3 | Loss: -0.0530 | Value Loss: 0.0000
+Epoch 19/100 | FPS: 982.7 | Loss: -0.0530 | Value Loss: 0.0000
+Epoch 20/100 | FPS: 926.8 | Loss: -0.0530 | Value Loss: 0.0000
+Epoch 21/100 | FPS: 918.1 | Loss: -0.0530 | Value Loss: 0.0000
+Epoch 22/100 | FPS: 975.0 | Loss: -0.0530 | Value Loss: 0.0000
+Epoch 23/100 | FPS: 906.2 | Loss: -0.0530 | Value Loss: 0.0000

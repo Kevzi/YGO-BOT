@@ -1,83 +1,69 @@
-# YGO-BOT 🐉
+# YGO-BOT: Distributed Deep Reinforcement Learning for Yu-Gi-Oh!
 
-> **Une Intelligence Artificielle Autonome (Deep RL) pour Yu-Gi-Oh!**
+YGO-BOT is an open-source, massive-scale Deep Reinforcement Learning project aimed at creating a super-human AI for the Yu-Gi-Oh! Trading Card Game. 
+It combines **Proximal Policy Optimization (PPO)**, **Gumbel AlphaZero MCTS**, and a fully distributed **Ray** architecture, all powered by **JAX/Flax** for maximum vectorization and hardware utilization.
 
-YGO-BOT est un projet de recherche et d'ingénierie visant à développer un agent intelligent capable d'atteindre un niveau de jeu surhumain au jeu de cartes à collectionner Yu-Gi-Oh!, en s'appuyant sur l'Apprentissage par Renforcement Profond (Deep Reinforcement Learning) et des modèles de fondation (LLMs).
+This project is currently designed to scale on massive cloud computing infrastructures to tackle one of the most complex board/card games in existence.
 
-## 🚀 Fonctionnalités Principales
+---
 
-- **Moteur de Règles C++** : Intégration du moteur officiel `ocgcore` encapsulé via un environnement OpenAI Gym (`ygoenv`) pour une simulation parfaite des duels.
-- **Deep Reinforcement Learning** : Algorithme PPO (Proximal Policy Optimization) implémenté en **JAX** pour une exécution ultra-rapide et parallélisée.
-- **Entraînement Distribué** : Orchestration via **Ray** pour le "League Training" (Self-Play et agents spécialisés) à grande échelle sur grappes CPU/TPU.
-- **Architecture Cognitive Avancée** :
-  - *Belief State (LSTM)* pour la gestion de l'information imparfaite (cartes face cachée, bluff).
-  - *Recherche MCTS / Gumbel AlphaZero* pour la projection et la planification des tours.
-  - *Moteur Zero-Shot via Embeddings* chargé en RAM (<100ms de latence) pour comprendre sémantiquement les nouvelles cartes inédites.
-- **API Performante** : Serveur REST en **FastAPI** communiquant en `camelCase` avec les clients externes (ex: interfaces Omega/Neos).
-- **Historisation et Statistiques** : Persistance robuste via **SQLite**, **SQLAlchemy 2.0**, et **Alembic** avec des modèles stricts (snake_case en DB).
+## 🧠 The Challenge: Why Yu-Gi-Oh! ?
 
-## 🏗️ Architecture du Projet
+Yu-Gi-Oh! presents unique challenges for Artificial Intelligence, far exceeding the complexity of Chess or Go:
+- **Massive State Space**: Over 10,000 unique cards with complex, chaining effects. Our observation vector has **60,694 dimensions**.
+- **Hidden Information**: Hands and face-down cards are hidden from the opponent (Imperfect Information game).
+- **Complex Action Space**: Up to 200 contextual actions (Summon, Activate, Chain, Attack) that dynamically change based on game state.
 
-```text
-ygo-bot/
-├── alembic/              # Migrations de base de données
-├── data/                 # Base de données SQLite locale (ygo.db)
-├── db/                   # Modèles SQLAlchemy (snake_case)
-├── schemas/              # Schémas Pydantic (camelCase pour l'API)
-├── tests/                # Suite de tests Pytest
-├── _bmad-output/         # Artefacts de planification et suivi de sprints
-└── pyproject.toml        # Dépendances (Poetry)
-```
+---
 
-## 🛠️ Installation et Démarrage Rapide
+## 🏗️ Technical Architecture
 
-Ce projet utilise [Poetry](https://python-poetry.org/) ou un environnement virtuel Python classique.
+### 1. Neural Network (JAX/Flax)
+The core of the agent is an `ActorCriticLSTM` network written purely in **Flax/JAX**:
+- **Embeddings Layer**: Projects categorical card IDs into a dense continuous space.
+- **LSTM Core**: Maintains a hidden state (`carry_state`) across turns to deal with partial observability and long-term planning.
+- **Action Masking**: A critical mechanism that zeroes out illegal actions dynamically at the logits level, preventing the network from wasting gradient updates on invalid moves.
 
-**Via environnement virtuel (recommandé) :**
+### 2. Distributed Asynchronous Self-Play (Ray)
+To overcome the massive computational requirement of environment simulation, we implemented a decoupled actor-learner architecture using **Ray**:
+- **Rollout Workers (CPU)**: Hundreds of lightweight actors run the C++ Yu-Gi-Oh! engine (`libocgcore`) to simulate games in parallel. They are restricted from GPU access to avoid VRAM bottlenecks.
+- **Learner (GPU/TPU)**: A centralized actor that receives batches of rollouts (States, Actions, Rewards, Advantages) and performs rapid Backpropagation and Policy Optimization using JAX's `jit` compilation.
+- **Parameter Server (SelfPlayManager)**: Maintains a history of network weights. Workers regularly pull older snapshots to train the agent against previous versions of itself, ensuring robust monotonic improvement.
 
+### 3. Gumbel AlphaZero & PPO
+We completely bypass manual *Reward Shaping* (which leads to Reward Hacking) and rely purely on the sparse end-game reward (+1 Win, -1 Loss). To achieve this:
+- **MCTS with Gumbel Noise**: We implement a Monte Carlo Tree Search at the rollout level. By injecting **Gumbel noise** at the root (Gumbel AlphaZero variant), the agent achieves stable exploration without needing hundreds of simulations.
+- **Curriculum Learning**: The architecture supports toggling MCTS off for a "Cold Start" rapid pure-PPO training, then activating MCTS for deep tactical fine-tuning.
+- **Generalized Advantage Estimation (GAE)**: Used to stabilize the policy updates over extremely long episodes.
+
+---
+
+## 🚀 Why We Need Google TRC (TPU Research Cloud)
+
+While the architecture is mathematically sound and highly optimized, Yu-Gi-Oh! requires an enormous amount of self-play to converge.
+- A single Rollout Worker needs to clone the C++ environment state hundreds of times per game to build the MCTS tree.
+- On a local machine (RTX 3070 Ti + 8-core CPU), generating a single batch of rollouts can take several minutes.
+- To reach professional human level, the agent must play **millions of games**.
+
+**Google TPUs** (via JAX's native XLA compilation) combined with a massive CPU cluster for Ray workers is the only way to scale this project from an architectural MVP to a superhuman agent. The code is already TPU-ready through JAX.
+
+---
+
+## 🛠️ Setup & Local Training
+
+### Requirements
+- Python 3.12+
+- WSL2 (for Windows users, required for the C++ engine)
+- JAX & Flax
+- Ray
+
+### Running the Distributed Training
+To launch the cluster locally and begin the PPO Self-Play loop:
 ```bash
-# 1. Cloner le dépôt
-git clone https://github.com/Kevzi/YGO-BOT.git
-cd YGO-BOT
-
-# 2. Créer un environnement virtuel
-python -m venv .venv
-
-# 3. Activer l'environnement
-# Sous Windows (PowerShell) :
-.\.venv\Scripts\Activate.ps1
-# Sous Linux/Mac :
-source .venv/bin/activate
-
-# 4. Installer les dépendances
-pip install sqlalchemy alembic pydantic fastapi uvicorn jax jaxlib ray pandas pytest
-
-# 5. Mettre à jour la base de données locale (SQLite)
-alembic upgrade head
+python scripts/train_distributed.py
 ```
+*(Tip: Set `PYTHONUNBUFFERED=1` to see real-time Ray logs)*
 
-## 🧪 Lancer les Tests
+---
 
-Pour s'assurer que les modèles de base de données et de schémas sont correctement configurés :
-
-```bash
-# S'assurer que le chemin racine est dans le PYTHONPATH
-$env:PYTHONPATH='.'  # Windows PowerShell
-export PYTHONPATH='.' # Linux/Mac
-
-pytest tests/ -v
-```
-
-## 📈 Suivi du Développement
-
-Le développement est orchestré via la méthode BMad (Agents Autonomes). Le cycle de vie est documenté dans le dossier `_bmad-output/`, incluant les épopées (`epics.md`) et le suivi de sprint (`sprint-status.yaml`).
-
-### Roadmap actuelle (Epic 1 : Sparring-Partner Local)
-- [x] Story 1.1 : Base de Données et Historisation (SQLite + Alembic)
-- [ ] Story 1.2 : Intégration du Moteur C++ (ygoenv / ocgcore)
-- [ ] Story 1.3 : Serveur API FastAPI
-- [ ] Story 1.4 : Agent Dummy (Boucle complète)
-
-## 📄 Licence
-
-(À définir)
+*This project is built upon `libocgcore` and draws inspiration from AlphaZero and deep reinforcement learning breakthroughs.*

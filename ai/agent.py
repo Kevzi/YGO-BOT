@@ -52,7 +52,7 @@ class MCTSAgent:
         # We can just do a forward pass on the selected action to get the next hidden state
         # Or, more simply, do a forward pass on the current state to get value & next hidden
         # for the worker's trajectory record.
-        probs, value, next_hidden = self.ppo_agent.forward(params, hidden_state, obs)
+        probs, value, next_hidden = self.ppo_agent.forward(params, hidden_state, obs, legal_actions)
         value = float(np.array(value))
         next_hidden = (np.array(next_hidden[0]), np.array(next_hidden[1]))
         

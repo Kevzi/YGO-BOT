@@ -1,0 +1,737 @@
+﻿diff --git a/ai/mcts.py b/ai/mcts.py
+index c8d522f..da197fc 100644
+--- a/ai/mcts.py
++++ b/ai/mcts.py
+@@ -1,164 +1,181 @@
+ import math
+-import numpy as np
++import jax
+ import jax.numpy as jnp
++import numpy as np
+ 
+ class MCTSNode:
+-    def __init__(self, prior: float):
+-        self.prior = prior
+-        self.visit_count = 0
+-        self.value_sum = 0.0
+-        self.children = {}
+-        self.hidden_state = None
+-        self.reward = 0.0
+-        self.is_expanded = False
++    """
++    N┼ôud de l'arbre MCTS pour Gumbel AlphaZero.
++    Stocke l'├®tat cach├® du LSTM (carry_state) pour ├®viter de recalculer
++    toute la s├®quence depuis le d├®but du duel.
++    """
++    def __init__(self, carry_state, action_mask, is_terminal=False, reward=0.0):
++        self.carry_state = carry_state
++        self.action_mask = action_mask
++        self.is_terminal = is_terminal
++        self.reward = reward
++        
++        self.children = {} # action (int) -> MCTSNode
++        self.N = 0 # Nombre de visites
++        self.W = 0.0 # Somme des valeurs (pour le joueur 0)
++        self.Q = 0.0 # Valeur moyenne
++        self.P = None # Probabilit├®s a priori (Policy issue du r├®seau)
++        
++    def expand(self, action_probs: np.ndarray):
++        """Initialise les probabilit├®s a priori (P)."""
++        self.P = action_probs
++        
++    def add_child(self, action: int, child_node: 'MCTSNode'):
++        self.children[action] = child_node
+ 
+-    def value(self):
+-        if self.visit_count == 0:
+-            return 0.0
+-        return self.value_sum / self.visit_count
++    def update(self, v: float):
++        """Met ├á jour les statistiques du n┼ôud (Backpropagation)."""
++        self.N += 1
++        self.W += v
++        self.Q = self.W / self.N
+ 
+ class MCTS:
+-    def __init__(self, num_simulations: int = 16, c_puct: float = 1.25):
+-        self.num_simulations = num_simulations
++    """
++    Recherche Arborescente Monte Carlo (MCTS) avec s├®lection PUCT et
++    variante Gumbel AlphaZero (ajout de bruit Gumbel ├á la racine).
++    """
++    def __init__(self, actor_critic, params, c_puct=1.25):
++        self.actor_critic = actor_critic
++        self.params = params
+         self.c_puct = c_puct
++        self.act_dim = actor_critic.act_dim
+ 
+-    def _puct_score(self, parent: MCTSNode, child: MCTSNode) -> float:
+-        pb_c = math.log((parent.visit_count + 1.25 + 19652.0) / 19652.0) + self.c_puct
+-        pb_c *= math.sqrt(parent.visit_count) / (child.visit_count + 1)
+-        prior_score = pb_c * child.prior
+-        value_score = child.value()
+-        return value_score + prior_score
+-
+-    def search(self, env, agent, params, hidden_state, obs, legal_actions):
++    def evaluate_state(self, carry, obs, prev_action, action_mask, apply_gumbel=False):
+         """
+-        Effectue la recherche MCTS (Gumbel AlphaZero style) depuis l'├®tat actuel.
+-        env: l'environnement (doit supporter save_state() et restore_state())
+-        agent: PPOAgent contenant la fonction forward()
+-        params: param├¿tres de l'agent
+-        hidden_state: ├®tat cach├® actuel (h, c) pour un seul ├®l├®ment (pas de batch dim)
+-        obs: observation courante
+-        legal_actions: masque bool├®en des actions l├®gales
++        ├ëvalue un ├®tat avec le r├®seau ActorCriticLSTM.
++        Si apply_gumbel est True, ajoute du bruit de Gumbel aux logits pour l'exploration.
+         """
+-        root = MCTSNode(0.0)
++        obs_jnp = jnp.expand_dims(jnp.array(obs, dtype=jnp.float32), 0)
++        prev_action_jnp = jnp.expand_dims(jnp.array(prev_action, dtype=jnp.int32), 0)
++        action_mask_jnp = jnp.expand_dims(jnp.array(action_mask, dtype=jnp.bool_), 0)
+         
+-        # 1. Expand root
+-        obs_jax = jnp.expand_dims(jnp.asarray(obs), axis=0) if np.asarray(obs).ndim == 1 else jnp.asarray(obs)
+-        probs, value, next_hidden_state = agent.forward(params, hidden_state, obs_jax)
++        new_carry, logits, value = self.actor_critic.apply(
++            self.params, carry, obs_jnp, prev_action_jnp, action_mask_jnp
++        )
+         
+-        probs_np = np.asarray(probs)
+-        if probs_np.ndim > 1:
+-            probs_np = probs_np.squeeze(0)
+-        value = float(jnp.squeeze(value))
+-        # Keep next_hidden_state as JAX array!
++        value = float(value[0, 0])
++        logits = np.array(logits[0])
+         
+-        # Apply legal actions mask
+-        legal_actions = np.array(legal_actions, dtype=np.bool_)
+-        probs_np = probs_np * legal_actions
+-        sum_probs = np.sum(probs_np)
+-        if sum_probs > 0:
+-            probs_np /= sum_probs
+-        else:
+-            probs_np = legal_actions / max(np.sum(legal_actions), 1e-8)
+-            
+-        # Gumbel noise at root for exploration
+-        gumbel_noise = np.random.gumbel(loc=0.0, scale=1.0, size=probs_np.shape)
+-        gumbel_noise = gumbel_noise * legal_actions
++        # Masquer les actions ill├®gales
++        valid_logits = np.where(action_mask, logits, -1e9)
+         
+-        # Add to logits-equivalent and softmax (Simplified Gumbel AlphaZero approach)
+-        logits = np.log(probs_np + 1e-8) + gumbel_noise
+-        exp_logits = np.exp(logits) * legal_actions
++        if apply_gumbel:
++            gumbel_noise = np.random.gumbel(size=valid_logits.shape)
++            valid_logits = np.where(action_mask, valid_logits + gumbel_noise, -1e9)
++            
++        # Softmax stable
++        max_logit = np.max(valid_logits)
++        exp_logits = np.exp(valid_logits - max_logit) * action_mask
++        sum_exp = np.sum(exp_logits)
+         
+-        sum_exp_logits = np.sum(exp_logits)
+-        if sum_exp_logits > 0:
+-            probs_with_noise = exp_logits / sum_exp_logits
++        if sum_exp > 0:
++            probs = exp_logits / sum_exp
+         else:
+-            probs_with_noise = probs_np
+-
+-        root.is_expanded = True
+-        root.hidden_state = next_hidden_state
+-        for a in range(len(probs)):
+-            if legal_actions[a]:
+-                root.children[a] = MCTSNode(prior=float(probs_with_noise[a]))
++            probs = action_mask / np.sum(action_mask)
++            
++        return new_carry, probs, value
+ 
+-        # Save base environment state
+-        base_state = env.save_state()
++    def select_child(self, node: MCTSNode) -> tuple[int, MCTSNode]:
++        """S├®lectionne le meilleur n┼ôud enfant selon la formule PUCT."""
++        best_action = -1
++        best_ucb = -float('inf')
++        
++        # First Play Urgency : on utilise le Q du parent pour les n┼ôuds non explor├®s
++        fpu = node.Q if node.N > 0 else 0.0
++        
++        for action in np.where(node.action_mask)[0]:
++            if action in node.children:
++                child = node.children[action]
++                u = node.P[action] * self.c_puct * math.sqrt(node.N) / (1 + child.N)
++                ucb = child.Q + u
++            else:
++                u = node.P[action] * self.c_puct * math.sqrt(node.N + 1e-8)
++                ucb = fpu + u
++                
++            if ucb > best_ucb:
++                best_ucb = ucb
++                best_action = int(action)
++                
++        return best_action, node.children.get(best_action, None)
+ 
+-        # 2. Simulations
+-        for _ in range(self.num_simulations):
+-            node = root
+-            current_hidden = root.hidden_state
+-            search_path = [node]
+-            env.restore_state(base_state)
++    def search(self, env, obs, carry, prev_action, num_simulations=50):
++        """
++        Ex├®cute la recherche MCTS ├á partir d'un ├®tat racine en utilisant env.clone().
++        """
++        root_mask = env.get_action_mask() if hasattr(env, 'get_action_mask') else env.get_legal_actions()
++        root_node = MCTSNode(carry, root_mask, is_terminal=False)
++        
++        # ├ëvaluation de la racine avec bruit Gumbel (Gumbel AlphaZero)
++        _, root_probs, _ = self.evaluate_state(carry, obs, prev_action, root_mask, apply_gumbel=True)
++        root_node.expand(root_probs)
++        
++        for _ in range(num_simulations):
++            node = root_node
++            sim_env = env.clone() # Action Replay (State Cloning)
++            path = [node]
+             
+-            # Selection
+-            done = False
+-            info = None
+-            while node.is_expanded and len(node.children) > 0:
+-                action, child = max(
+-                    node.children.items(),
+-                    key=lambda item: self._puct_score(node, item[1])
++            # 1. Selection
++            action_taken = prev_action
++            while not node.is_terminal:
++                action, next_node = self.select_child(node)
++                action_taken = action
++                if next_node is None:
++                    break
++                    
++                # On avance dans l'environnement clon├®
++                step_obs, step_reward, terminated, truncated, _ = sim_env.step(action)
++                node = next_node
++                path.append(node)
++                
++            # 2. Expansion
++            if not node.is_terminal:
++                # Appliquer l'action trouv├®e lors de la s├®lection
++                step_obs, step_reward, terminated, truncated, _ = sim_env.step(action_taken)
++                new_mask = sim_env.get_legal_actions()
++                
++                new_carry, probs, value = self.evaluate_state(
++                    node.carry_state, step_obs, action_taken, new_mask, apply_gumbel=False
+                 )
+-                node = child
+-                search_path.append(node)
+-                obs, reward, terminated, truncated, info = env.step(action)
+-                done = terminated or truncated
+-                if node.is_expanded:
+-                    current_hidden = node.hidden_state
+                 
+-            value_for_backprop = 0.0
+-            
+-            if not done:
+-                # Expansion & Evaluation
+-                obs_jax_step = jnp.expand_dims(jnp.asarray(obs), axis=0) if np.asarray(obs).ndim == 1 else jnp.asarray(obs)
+-                probs_deep, value_deep, next_hidden_deep = agent.forward(params, current_hidden, obs_jax_step)
+-                probs_deep_np = np.asarray(probs_deep)
+-                if probs_deep_np.ndim > 1:
+-                    probs_deep_np = probs_deep_np.squeeze(0)
+-                value_for_backprop = float(jnp.squeeze(value_deep))
++                new_node = MCTSNode(new_carry, new_mask, is_terminal=terminated, reward=step_reward)
++                new_node.expand(probs)
++                node.add_child(action_taken, new_node)
+                 
+-                # Assume all actions are legal in deeper nodes for simplicity if we don't have access to deep legal_actions
+-                # In a real engine, we query legal actions after env.step()
+-                if info is not None and "legal_actions" in info:
+-                    legal_actions_deep = np.asarray(info["legal_actions"], dtype=np.bool_)
+-                else:
+-                    legal_actions_deep = np.ones_like(probs_deep_np, dtype=np.bool_)
+-                    
+-                probs_deep_np = probs_deep_np * legal_actions_deep
+-                sum_probs = np.sum(probs_deep_np)
+-                if sum_probs > 0:
+-                    probs_deep_np /= sum_probs
+-                else:
+-                    probs_deep_np = legal_actions_deep / max(np.sum(legal_actions_deep), 1e-8)
+-                    
+-                node.is_expanded = True
+-                node.hidden_state = next_hidden_deep
+-                for a in range(len(probs_deep_np)):
+-                    if legal_actions_deep[a]:
+-                        node.children[a] = MCTSNode(prior=float(probs_deep_np[a]))
++                path.append(new_node)
++                v = value
+             else:
+-                value_for_backprop = float(reward)
+-
+-            # Backpropagation
+-            for n in reversed(search_path):
+-                n.value_sum += value_for_backprop
+-                n.visit_count += 1
+-                # Flip value for opponent if it's a 2-player zero-sum game with alternating turns
+-                # Here we assume a single-agent perspective or symmetric zero-sum (simplification)
+-                value_for_backprop = -value_for_backprop 
+-
+-        # Restore original env state
+-        env.restore_state(base_state)
++                v = node.reward
++                
++            # 3. Backpropagation
++            # Le jeu est mod├®lis├® de la perspective du Joueur 0. 
++            # Les rewards de env.py sont d├®j├á globaux (1.0 pour victoire P0, -1.0 pour P1).
++            for n in path:
++                n.update(v)
++                
++        return root_node
+ 
+-        # 3. Policy Improvement
+-        visit_counts = np.zeros(len(probs_with_noise))
+-        for a, child in root.children.items():
+-            visit_counts[a] = child.visit_count
++    def get_action_probs(self, root_node: MCTSNode, temperature=1.0) -> np.ndarray:
++        """Calcule les probabilit├®s d'action finales bas├®es sur les visites MCTS."""
++        action_visits = np.zeros(self.act_dim, dtype=np.float32)
++        for action, child in root_node.children.items():
++            action_visits[action] = child.N
+             
+-        if np.sum(visit_counts) > 0:
+-            policy_improved = visit_counts / np.sum(visit_counts)
++        if temperature == 0:
++            best_action = np.argmax(action_visits)
++            probs = np.zeros_like(action_visits)
++            probs[best_action] = 1.0
++            return probs
++            
++        action_visits = action_visits ** (1.0 / temperature)
++        sum_visits = np.sum(action_visits)
++        if sum_visits > 0:
++            probs = action_visits / sum_visits
+         else:
+-            policy_improved = legal_actions / max(np.sum(legal_actions), 1e-8)
++            probs = root_node.action_mask / np.sum(root_node.action_mask)
+             
+-        action = np.argmax(policy_improved)
+-        
+-        return int(action), policy_improved
++        return probs
+diff --git a/core/ygoenv/env.py b/core/ygoenv/env.py
+index f5c45eb..65548ec 100644
+--- a/core/ygoenv/env.py
++++ b/core/ygoenv/env.py
+@@ -12,67 +12,222 @@ class YgoEnv(gym.Env):
+         
+         # Dimensions pour le MVP:
+         # - Action space: par exemple 200 actions discr├¿tes possibles (id de l'action)
++        # Espace d'action: Par exemple, 200 actions discr├¿tes possibles
+         self.action_space = gym.spaces.Discrete(200)
+         
+-        self.NUM_CARDS = 15
+-        self.DEFAULT_EMBEDDING_DIM = 64
+-        
+-        from ai.embeddings import embed_loader
+-        self.embedding_dim = embed_loader._embedding_dim if embed_loader.is_loaded() and embed_loader._embedding_dim > 0 else self.DEFAULT_EMBEDDING_DIM
+-        
+-        # - Observation space: tenseur plat float32 de taille fixe (NUM_CARDS * embedding_dim) repr├®sentant le terrain vectoris├®
+-        self.observation_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(self.NUM_CARDS * self.embedding_dim,), dtype=np.float32)
++        # Espace d'observation: Un vecteur plat (ex: 960 features)
++        self.observation_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(960,), dtype=np.float32)
+         
+         self.engine = YgoEngine()
+         self._current_state = None
++        self.max_turns = 100
++        self.action_history = []
++        
++        # Charger les embeddings
++        try:
++            from ai.embeddings import EmbeddingLoader
++            self.embed_loader = EmbeddingLoader()
++            self.embed_loader.load()
++            embed_dim = self.embed_loader._embedding_dim
++            if embed_dim > 0:
++                self.observation_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(60694,), dtype=np.float32)
++            import logging
++            logging.info(f"Embeddings charg├®s avec dimension {embed_dim}.")
++        except Exception as e:
++            import logging
++            logging.error(f"Erreur lors du chargement des embeddings: {e}")
++            self.embed_loader = None
++
++    def get_action_mask(self):
++        """
++        Retourne un masque bool├®en (ou de 0/1) indiquant quelles actions sont l├®gales.
++        Pour l'instant, c'est un mock o├╣ toutes les actions sont l├®gales.
++        """
++        import numpy as np
++        return np.ones(self.action_space.n, dtype=np.float32)
++
++    def set_deck(self, deck: dict):
++        """Injecte le deck de l'agent dans l'environnement."""
++        self.agent_deck = deck
+         
+     def _get_observation(self, mock_card_ids: np.ndarray = None) -> np.ndarray:
+-        # TODO: Appeler l'engine pour extraire les identifiants r├®els des cartes sur le terrain
+-        # Pour le MVP, on simule une liste de cartes. La plupart sont vides (0, donc inconnues).
+-        from ai.embeddings import embed_loader
++        # Appeler l'engine pour extraire les informations riches des cartes
++        cards_info = self.engine.query_field_state(0) # on interroge l'├®tat pour le joueur 0
++        global_info = self.engine.get_global_info() if hasattr(self.engine, 'get_global_info') else {"lp": [8000, 8000]}
+         
+-        card_ids = mock_card_ids if mock_card_ids is not None else np.zeros(self.NUM_CARDS, dtype=np.int32)
++        # Brouillard de Guerre et Filtres
++        for card in cards_info:
++            player = card["player"]
++            loc = card["location"]
++            pos = card.get("position", 0)
++            
++            # Condition pour masquer:
++            # - Appartient ├á l'adversaire (player == 1)
++            # - ET (dans la main/deck/extra OU face cach├®e sur le terrain)
++            is_opponent = (player == 1)
++            is_hidden_location = loc in [0x01, 0x02, 0x40] # Deck, Hand, Extra
++            is_facedown = (pos & 0xA) != 0 # POS_FACEDOWN_ATTACK = 2 | 8, POS_FACEDOWN_DEFENSE = 8
++            
++            if is_opponent and (is_hidden_location or is_facedown):
++                card["code"] = 0
++                card["level"] = 0
++                card["type"] = 0
++                card["attack"] = 0
++                card["defense"] = 0
++                
++        # Structure de 156 slots
++        slots = []
+         
+-        if not embed_loader.is_loaded():
+-            import logging
+-            logging.warning("Embedding loader non charg├® ! Appel implicite ├á load() ou retour de z├®ros si mock.")
+-            # Fallback en silence uniquement parce qu'on est en dev/test. Dans un vrai moteur : embed_loader.load()
+-            return np.zeros(self.observation_space.shape, dtype=np.float32)
++        def filter_loc(p, l, max_len):
++            found = [c for c in cards_info if c["player"] == p and c["location"] == l]
++            # Pour la MZone/SZone, la s├®quence est importante (0 ├á 4 pour MZone, 0 ├á 5 pour EMZone, etc.)
++            # Mais pour simplifier, on pad juste ├á max_len
++            while len(found) < max_len:
++                found.append({"code": 0, "position": 0, "type": 0, "level": 0, "attack": 0, "defense": 0})
++            return found[:max_len]
+             
+-        if embed_loader._embedding_dim != self.embedding_dim:
+-            raise ValueError(f"Shape Mismatch Lazy-Loading: YgoEnv initialis├® avec {self.embedding_dim} mais embed_loader a {embed_loader._embedding_dim}.")
++        for player in [0, 1]:
++            slots.extend(filter_loc(player, 0x04, 5)) # MZone (5)
++            slots.extend(filter_loc(player, 0x08, 5)) # SZone (5)
++            slots.extend(filter_loc(player, 0x100, 1)) # FZone (1) - YGOPro FZone est souvent seq=5 dans SZone, on g├¿rera plus tard, pour le moment on pad
++            slots.extend(filter_loc(player, 0x200, 1)) # EMZone (1)
++            slots.extend(filter_loc(player, 0x02, 15)) # Hand (15)
++            slots.extend(filter_loc(player, 0x10, 20)) # Grave (20)
++            slots.extend(filter_loc(player, 0x20, 15)) # Removed (15)
++            slots.extend(filter_loc(player, 0x40, 15)) # Extra (15)
+             
+-        vectors = embed_loader.get_embeddings_batch(card_ids)
+-        return np.asarray(vectors, dtype=np.float32).flatten()
++            # Le Deck (1 slot sp├®cial)
++            deck_cards = [c for c in cards_info if c["player"] == player and c["location"] == 0x01]
++            deck_slot = {"code": 0, "position": 0, "type": 0, "level": len(deck_cards), "attack": 0, "defense": 0} # On stocke la taille dans "level"
++            slots.append(deck_slot)
++
++        # R├®solution des embeddings et normalisation
++        features = []
++        for i, slot in enumerate(slots):
++            cid = slot.get("code", 0)
++            
++            # Normalisation
++            pos = float(slot.get("position", 0))
++            ctype = float(slot.get("type", 0))
++            atk = float(slot.get("attack", 0)) / 5000.0
++            def_val = float(slot.get("defense", 0)) / 5000.0
++            
++            # Traitement sp├®cial pour le Deck Slot (index 77 et 155)
++            if i == 77 or i == 155:
++                lvl = float(slot.get("level", 0)) / 60.0 # Taille du deck
++            else:
++                lvl = float(slot.get("level", 0)) / 12.0
++            
++            stats = np.array([pos, lvl, ctype, atk, def_val], dtype=np.float32)
++            
++            if cid > 0 and self.embed_loader and hasattr(self.embed_loader, 'get_embedding'):
++                try:
++                    emb = self.embed_loader.get_embedding(int(cid))
++                except Exception:
++                    emb = np.zeros(384, dtype=np.float32)
++            else:
++                emb = np.zeros(384, dtype=np.float32) # Fallback
++                
++            features.append(stats)
++            features.append(emb)
++            
++        # Ajout des Informations Globales (LP, Phase)
++        lp_0 = float(global_info["lp"][0]) / 8000.0
++        lp_1 = float(global_info["lp"][1]) / 8000.0
++        
++        # Encodage One-Hot de la Phase (8 dimensions)
++        phase_map = {"DRAW": 0, "STANDBY": 1, "MAIN1": 2, "BATTLE": 3, "MAIN2": 4, "END": 5, "START": 6}
++        phase_idx = phase_map.get(self._current_state.get("phase", "START"), 7)
++        phase_one_hot = np.zeros(8, dtype=np.float32)
++        phase_one_hot[phase_idx] = 1.0
++        
++        global_vec = np.array([lp_0, lp_1], dtype=np.float32)
++        features.append(global_vec)
++        features.append(phase_one_hot)
++            
++        # Concat├®ner en un seul vecteur (60694)
++        obs = np.concatenate(features)
++        return obs
+         
+     def get_legal_actions(self) -> np.ndarray:
++        """
++        Retourne un masque des actions l├®gales depuis le moteur C++.
++        """
++        mask = np.zeros(self.action_space.n, dtype=np.bool_)
++        
+         if self._current_state is None:
+-            return np.ones(self.action_space.n, dtype=np.bool_)
++            mask[0] = True
++            return mask
+             
+         actions = self.engine.get_legal_actions(self._current_state)
+-        mask = np.zeros(self.action_space.n, dtype=np.bool_)
++        self._current_state_actions = actions # Save for step translation
++        
+         for a in actions:
+-            # MVP: on utilise 'action_type' comme index d'action
+-            idx = a.get("action_type", 0)
+-            if 0 <= idx < self.action_space.n:
+-                mask[idx] = True
++            if a.get("msg") in ["MSG_SELECT_IDLECMD", "MSG_SELECT_BATTLECMD", "MSG_SELECT_CARD"]:
++                for choice in a.get("choices", []):
++                    idx = choice.get("action_idx")
++                    if idx is not None and 0 <= idx < self.action_space.n:
++                        mask[idx] = True
++            else:
++                # fallback old behaviour
++                idx = a.get("action_type", 0)
++                if 0 <= idx < self.action_space.n:
++                    mask[idx] = True
+                 
+-        # Fallback de s├®curit├® pour ├®viter un masque compl├¿tement vide
++        # Fallback de s├®curit├® si l'engine ne retourne rien d'exploitable
+         if not np.any(mask):
+             mask[0] = True
+-            
++                
+         return mask
+         
+     def reset(self, seed=None, options=None) -> tuple[np.ndarray, dict]:
+         super().reset(seed=seed, options=options)
+         
+-        # Initialiser un duel ou r├®initialiser l'├®tat
++        self.action_history = []
++        
++        # D├®truire le duel pr├®c├®dent s'il existe
++        self.engine.destroy_duel()
++        
++        # Initialiser un nouveau duel C++
+         self._current_state = {"phase": "DRAW", "turn": 1}
++        self._current_state_actions = []
++        duel_ok = self.engine.create_duel()
++        
++        if not duel_ok:
++            import logging
++            logging.warning("Impossible de cr├®er un duel C++. L'env tourne en mode d├®grad├®.")
++        else:
++            # Charger un deck Beatdown pour les 2 joueurs
++            try:
++                from db.session import SessionLocal
++                from db.models import Card
++                with SessionLocal() as db:
++                    # Blue-Eyes White Dragon (89631139) et Gene-Warped Warwolf (03201284)
++                    beatdown_codes = [89631139, 3201284]
++                    cards = db.query(Card).filter(Card.id.in_(beatdown_codes)).all()
++                    codes = [c.id for c in cards]
++                    
++                    if len(codes) > 0:
++                        # Remplir le Deck avec ce qu'on a trouv├® (altern├® pour faire 40 cartes)
++                        deck = (codes * 20)[:40]
++                        
++                        for player in (0, 1):
++                            for seq, code in enumerate(deck):
++                                self.engine.add_card(code, player, 0x01, seq, 0x8)
++                                
++                        self.engine.start_duel()
++            except Exception as e:
++                import logging
++                logging.error(f"Erreur lors du chargement du deck: {e}")
++                
++        # Le state n'est pas None, il faut au moins un dict pour bypasser le if is None
++        self._current_state = {"phase": "START", "turn": 1}
+         
++        # On doit d'abord appeler get_legal_actions pour avancer le moteur (tirage des mains, etc.)
++        legal_actions = self.get_legal_actions()
+         obs = self._get_observation()
+-        info = {"legal_actions": self.get_legal_actions()}
+         
+-        return obs, info
++        return obs, {"legal_actions": legal_actions}
+         
+     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict]:
+         if self._current_state is None:
+@@ -81,15 +236,39 @@ class YgoEnv(gym.Env):
+         if not self.action_space.contains(action):
+             raise ValueError(f"Action invalide: {action}")
+             
+-        # Appliquer l'action au state
+-        self._current_state["last_action"] = action
+-            
+-        # Simuler un passage au tour suivant ou fin de partie
+-        obs = self._get_observation()
++        self.action_history.append(action)
++        
+         reward = 0.0
+         terminated = False
+         truncated = False
+-        info = {"legal_actions": self.get_legal_actions()}
++        
++        # Traduction de l'action
++        self.engine.translate_and_set_response(action, self._current_state_actions)
++        
++        # Le moteur simule le reste jusqu'├á la prochaine attente
++        new_actions = self.engine.get_legal_actions(self._current_state)
++        
++        # Parser les messages pour chercher MSG_WIN (5) ou autres events importants
++        for a in new_actions:
++            if a.get("msg") == "WIN":
++                terminated = True
++                # player 0 = nous, player 1 = adversaire, player 2 = draw
++                win_player = a.get("player", 2)
++                if win_player == 0:
++                    reward = 1.0
++                elif win_player == 1:
++                    reward = -1.0
++                else:
++                    reward = 0.0
++                break
++        
++        # Mettre ├á jour l'├®tat mock
++        self._current_state["turn"] += 1
++        if self._current_state["turn"] >= self.max_turns:
++            truncated = True
++            
++        obs = self._get_observation()
++        info = {"legal_actions": new_actions}
+         
+         return obs, reward, terminated, truncated, info
+ 
+@@ -108,3 +287,19 @@ class YgoEnv(gym.Env):
+         self._current_state = copy.deepcopy(state["current_state"])
+         if state.get("engine_state") is not None and hasattr(self.engine, 'restore_state'):
+             self.engine.restore_state(state["engine_state"])
++
++    def clone(self) -> 'YgoEnv':
++        """
++        Clone l'environnement via Action Replay.
++        Cr├®e un nouvel environnement et rejoue l'historique complet des actions.
++        """
++        new_env = YgoEnv()
++        if hasattr(self, 'agent_deck'):
++            new_env.set_deck(self.agent_deck)
++            
++        new_env.reset()
++        
++        for act in self.action_history:
++            new_env.step(act)
++            
++        return new_env
+diff --git a/tests/test_mcts.py b/tests/test_mcts.py
+new file mode 100644
+index 0000000..5b39f63
+--- /dev/null
++++ b/tests/test_mcts.py
+@@ -0,0 +1,84 @@
++import pytest
++import numpy as np
++import jax.numpy as jnp
++from ai.mcts import MCTS, MCTSNode
++
++class MockActorCritic:
++    def __init__(self, act_dim=200):
++        self.act_dim = act_dim
++        
++    def apply(self, params, carry, obs, prev_action, action_mask):
++        # Fake evaluation
++        new_carry = (carry[0] + 0.1, carry[1] + 0.1)
++        logits = np.zeros((1, self.act_dim), dtype=np.float32)
++        # On favorise l'action 5 si elle est l├®gale
++        if action_mask[0, 5]:
++            logits[0, 5] = 2.0
++        value = np.array([[0.5]], dtype=np.float32)
++        return new_carry, logits, value
++
++class MockEnv:
++    def __init__(self):
++        self.action_history = []
++        self.step_count = 0
++        
++    def get_action_mask(self):
++        mask = np.zeros(200, dtype=np.bool_)
++        mask[0] = True
++        mask[5] = True
++        return mask
++        
++    def get_legal_actions(self):
++        return self.get_action_mask()
++        
++    def clone(self):
++        new_env = MockEnv()
++        new_env.action_history = list(self.action_history)
++        new_env.step_count = self.step_count
++        return new_env
++        
++    def step(self, action):
++        self.action_history.append(action)
++        self.step_count += 1
++        obs = np.ones((60694,), dtype=np.float32)
++        
++        terminated = self.step_count >= 3
++        reward = 1.0 if terminated else 0.0
++        truncated = False
++        return obs, reward, terminated, truncated, {}
++
++def test_mcts_search_independence():
++    env = MockEnv()
++    actor = MockActorCritic(act_dim=200)
++    mcts = MCTS(actor, params=None, c_puct=1.25)
++    
++    carry = (jnp.zeros((1, 512)), jnp.zeros((1, 512)))
++    obs = np.ones((60694,), dtype=np.float32)
++    prev_action = 0
++    
++    root = mcts.search(env, obs, carry, prev_action, num_simulations=15)
++    
++    # Le r├®seau doit avoir simul├® des chemins
++    assert root.N == 15
++    assert len(root.children) > 0
++    
++    # L'environnement de base doit rester intact (State Cloning isolation)
++    assert env.step_count == 0
++    assert len(env.action_history) == 0
++
++def test_mcts_action_probs():
++    env = MockEnv()
++    actor = MockActorCritic(act_dim=200)
++    mcts = MCTS(actor, params=None, c_puct=1.25)
++    
++    carry = (jnp.zeros((1, 512)), jnp.zeros((1, 512)))
++    obs = np.ones((60694,), dtype=np.float32)
++    
++    root = mcts.search(env, obs, carry, prev_action=0, num_simulations=20)
++    probs = mcts.get_action_probs(root, temperature=1.0)
++    
++    # Les probabilit├®s doivent sommer ├á 1
++    assert np.abs(np.sum(probs) - 1.0) < 1e-5
++    
++    # Le r├®seau favorisait l'action 5, PUCT devrait l'avoir explor├®e davantage
++    assert probs[5] > probs[0]

@@ -17,14 +17,17 @@ class RolloutWorker:
         self.env = YgoEnv(omniscience=True)
         self.obs, self.info = self.env.reset()
         
-    def collect_rollout(self, params, agent, opponent_params, steps=256):
+    def collect_rollout(self, params, agent, opponent_params, steps=256, max_steps=10000):
         """Collecte un segment de trajectoire avec les poids actuels."""
         states, actions, rewards, dones, log_probs, values, masks = [], [], [], [], [], [], []
         
         hidden_state_learner = agent.init_hidden_state(1)
         hidden_state_opponent = agent.init_hidden_state(1)
         
-        while len(states) < steps:
+        total_env_steps = 0
+        
+        while len(states) < steps and total_env_steps < max_steps:
+            total_env_steps += 1
             mask = self.env.get_action_mask()
             current_player = self.info.get("current_player", 0)
             
@@ -44,7 +47,12 @@ class RolloutWorker:
                 hidden_state_opponent = next_hidden
             
             masked_probs = probs * mask
-            masked_probs = masked_probs / (np.sum(masked_probs) + 1e-8)
+            prob_sum = np.sum(masked_probs)
+            if prob_sum == 0:
+                masked_probs = mask / (np.sum(mask) + 1e-8)
+            else:
+                masked_probs = masked_probs / prob_sum
+                
             action = np.random.choice(len(masked_probs), p=np.array(masked_probs))
             
             next_obs, reward, terminated, truncated, self.info = self.env.step(action)
@@ -56,15 +64,24 @@ class RolloutWorker:
                 masks.append(mask)
                 actions.append(action)
                 rewards.append(reward)
-                dones.append(done)
+                dones.append(terminated)
                 values.append(value)
                 log_probs.append(np.log(masked_probs[action] + 1e-8))
+            elif done and len(rewards) > 0:
+                rewards[-1] += reward
+                dones[-1] = terminated
             
             self.obs = next_obs
             if done:
                 self.obs, self.info = self.env.reset()
                 hidden_state_learner = agent.init_hidden_state(1)
                 hidden_state_opponent = agent.init_hidden_state(1)
+                
+        # Calcul du bootstrap value pour l'état final s'il n'est pas terminal
+        bootstrap_value = 0.0
+        if len(states) > 0 and not dones[-1]:
+            _, b_value, _ = agent.forward(params, hidden_state_learner, self.obs, self.env.get_action_mask())
+            bootstrap_value = float(b_value)
                 
         return {
             "states": np.array(states),
@@ -73,7 +90,8 @@ class RolloutWorker:
             "rewards": np.array(rewards),
             "dones": np.array(dones),
             "log_probs": np.array(log_probs),
-            "values": np.array(values)
+            "values": np.array(values),
+            "bootstrap_value": bootstrap_value
         }
 
 def compute_gae(rollout, gamma=0.99, lam=0.95):
@@ -81,16 +99,15 @@ def compute_gae(rollout, gamma=0.99, lam=0.95):
     rewards = rollout["rewards"]
     values = rollout["values"]
     dones = rollout["dones"]
+    bootstrap_value = rollout.get("bootstrap_value", 0.0)
     
     advantages = np.zeros_like(rewards, dtype=np.float32)
     lastgaelam = 0
-    # Append 0 for next value at end of rollout
-    next_values = np.append(values[1:], 0.0)
     
     for t in reversed(range(len(rewards))):
         if t == len(rewards) - 1:
             nextnonterminal = 1.0 - dones[t]
-            nextvalues = 0.0
+            nextvalues = bootstrap_value
         else:
             nextnonterminal = 1.0 - dones[t]
             nextvalues = values[t+1]

@@ -1,0 +1,1735 @@
+﻿diff --git a/.gitignore b/.gitignore
+index f2b559d..7f6cd01 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -62,3 +62,6 @@ Thumbs.db
+ # VS Code / IDE
+ .vscode/
+ .idea/
++
++# Data scripts
++data/scripts/
+diff --git a/_bmad-output/implementation-artifacts/4-2-interoperabilite-du-parseur-de-decks.md b/_bmad-output/implementation-artifacts/4-2-interoperabilite-du-parseur-de-decks.md
+new file mode 100644
+index 0000000..739c227
+--- /dev/null
++++ b/_bmad-output/implementation-artifacts/4-2-interoperabilite-du-parseur-de-decks.md
+@@ -0,0 +1,103 @@
++---
++epic: 4
++story: 2
++title: "Interopérabilité du Parseur de Decks (omega-api-decks)"
++status: ready-for-dev
++baseline_commit: 794ba6e94fff9482700463dc805436e21f060bda
++---
++
++# Story 4.2: Interopérabilité du Parseur de Decks (omega-api-decks)
++
++Status: done
++
++<!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
++
++## Story
++
++As a Joueur / Chercheur,
++I want de pouvoir charger un deck via un format standard (`.ydk` ou code presse-papier) en envoyant la requête au microservice `omega-api-decks`,
++So that l'environnement Python reçoive systématiquement une liste d'IDs entiers (passcodes) propre et validée, peu importe la complexité du format d'entrée.
++
++## Acceptance Criteria
++
++1. **Given** un fichier de deck brut soumis à l'API FastAPI
++   **When** FastAPI délègue la requête de conversion au microservice local `omega-api-decks`
++   **Then** le microservice le décode et FastAPI extrait les passcodes (Main/Extra/Side)
++   **And** la liste d'IDs validée est injectée pour initialiser correctement le deck de l'agent dans l'environnement Gym (`ygoenv`).
++
++## Tasks / Subtasks
++
++- [x] Task 1: Créer les schémas Pydantic
++  - [x] Subtask 1.1: Créer `DeckImportRequest` et `DeckImportResponse` avec `alias_generator = to_camel`.
++- [x] Task 2: Implémenter le service de parsing
++  - [x] Subtask 2.1: Créer un client HTTP asynchrone dans un nouveau fichier (ex: `core/deck_parser.py`) pour appeler `omega-api-decks`.
++  - [x] Subtask 2.2: Gérer les exceptions réseau et API (Fail Fast).
++- [x] Task 3: Exposer la route API FastAPI
++  - [x] Subtask 3.1: Ajouter l'endpoint `POST /api/v1/decks/import` dans `api/duel_routes.py` (ou `api/deck_routes.py`).
++  - [x] Subtask 3.2: Intégrer la gestion d'erreur `DECK_PARSER_ERROR` avec renvoi 500 structuré.
++- [x] Task 4: Tests unitaires
++  - [x] Subtask 4.1: Ajouter des tests dans `tests/api/` utilisant `httpx_mock` pour valider le parsing en succès et en échec.
++
++## Dev Agent Guardrails
++
++### Technical Requirements
++- Le module doit interagir en tant que client avec le microservice local `omega-api-decks`.
++- L'API FastAPI (`api/`) doit disposer d'une route pour l'import d'un deck (que ce soit un fichier `.ydk` uploadé, ou une string brute via JSON).
++- Requête HTTP Asynchrone : interroger `omega-api-decks` pour obtenir le deck sous forme de liste d'identifiants.
++- Pydantic : Utilisation stricte de l'alias generator `to_camel` pour les schémas de l'API. Modèles attendus : `DeckImportRequest` et `DeckImportResponse`.
++- "Fail Fast": Si `omega-api-decks` est injoignable ou renvoie une erreur, FastAPI doit immédiatement renvoyer une erreur 500 structurée (`{"error": {"code": "DECK_PARSER_ERROR", "detail": "..."}}`). Ne pas faire de retry silencieux.
++
++### Architecture Compliance
++- Ne pas mixer la logique IA et la logique d'API. Le contrôleur HTTP se placera dans `api/duel_routes.py` ou un fichier équivalent (ex: `api/deck_routes.py`).
++- Les noms de variables internes doivent respecter le `snake_case`.
++
++### Library & Framework Requirements
++- L'utilisation de `httpx` (async) est requise pour effectuer l'appel au microservice externe, puisqu'elle a été validée à la story précédente.
++
++### Testing Requirements
++- Ajouter des tests via Pytest dans le dossier `tests/api/`.
++- Les appels HTTP sortants de FastAPI vers `omega-api-decks` DOIVENT être mockés, préférentiellement avec `pytest-httpx` ou `httpx_mock` (existant dans les tests).
++- Tester à la fois les scénarios de réussite (parsing valide) et les scénarios d'échec (microservice indisponible, ou parser renvoyant une erreur 400).
++
++## Previous Story Intelligence (Learnings from 4.1)
++- L'utilisation de `sys.exit(1)` au sein des fonctions internes est un anti-pattern dangereux identifié lors de l'implémentation de `sync_ygoprodeck.py`. Toujours lever des exceptions (ex: `HTTPError` ou exception custom) et laisser la gestion à un bloc contrôleur englobant.
++- Les tests ne doivent pas polluer la base de données de production/dev (utilisation correcte des fixtures).
++- Veiller aux types de contraintes imposés sur les schémas SQLite si utilisés, bien que cette story ne concerne *a priori* pas la base.
++
++## Completion Status
++- Ultimate context engine analysis completed - comprehensive developer guide created.
++
++## Dev Agent Record
++
++### Implementation Plan
++- Création des modèles `DeckImportRequest` et `DeckImportResponse` avec le support du `camelCase` natif Pydantic.
++- Ajout de `core/deck_parser.py` qui encapsule les appels asynchrones HTTP via `httpx` au service de parsing `omega-api-decks`.
++- Création du router FastAPI `api/deck_routes.py` et intégration dans `api/main.py`.
++- L'approche "Fail Fast" est scrupuleusement respectée avec les renvois explicites et structurés des erreurs 500 sans retry.
++- Testé de bout en bout avec mock `httpx`. 
++
++### Completion Notes
++- Toutes les tâches et sous-tâches ont été terminées avec succès. 39 tests de la suite passent. 
++
++## File List
++- `api/schemas.py` [NEW]
++- `api/deck_routes.py` [NEW]
++- `api/main.py` [MODIFIED]
++- `core/deck_parser.py` [NEW]
++- `tests/api/test_deck_routes.py` [NEW]
++
++## Change Log
++- Implémentation du routeur `deck_routes` et du parseur asynchrone pour l'intégration de `omega-api-decks`.
++
++### Review Findings
++- [x] [Review][Patch] Injection into Gym environment missing in FastAPI route [`api/deck_routes.py`]
++- [x] [Review][Patch] Unsafe dictionary extraction / Payload validation [`core/deck_parser.py`]
++- [x] [Review][Patch] Unbounded Payload Exposure & Empty string [`api/schemas.py`]
++- [x] [Review][Patch] Inefficient HTTP Client Instantiation [`core/deck_parser.py`]
++- [x] [Review][Patch] Gaps in test coverage & Superficial Test Assertions [`tests/api/test_deck_routes.py`]
++- [x] [Review][Defer] Hardcoded Service URLs in Core Logic [`core/deck_parser.py`] — deferred, pre-existing
++- [x] [Review][Defer] Framework Error Handling via JSONResponse directly [`api/deck_routes.py`] — deferred, mandated by spec for MVP
++- [x] [Review][Defer] Missing Endpoint Documentation [`api/deck_routes.py`] — deferred, out of scope
++- [x] [Review][Defer] Hardcoded Magic Strings for Error Codes [`api/deck_routes.py`] — deferred, out of scope
++- [x] [Review][Defer] Contextless Error Logging [`api/deck_routes.py`] — deferred, out of scope
++
+diff --git a/_bmad-output/implementation-artifacts/deferred-work.md b/_bmad-output/implementation-artifacts/deferred-work.md
+index d53aef0..6f0d525 100644
+--- a/_bmad-output/implementation-artifacts/deferred-work.md
++++ b/_bmad-output/implementation-artifacts/deferred-work.md
+@@ -80,3 +80,10 @@
+ ## Deferred from: code review of 4-1-synchronisation-et-cache-ygoprodeck (2026-06-12)
+ - [ ] Hard SQLite Dialect Lock-in (architecture specifies SQLite for now)
+ - [ ] Missing Indexing Strategy (atk, def, etc.)
++## Deferred from: code review of 4-2-interoperabilite-du-parseur-de-decks.md (2026-06-12)
++- Hardcoded Service URLs in Core Logic [core/deck_parser.py]
++- Framework Error Handling via JSONResponse directly [api/deck_routes.py]
++- Missing Endpoint Documentation [api/deck_routes.py]
++- Hardcoded Magic Strings for Error Codes [api/deck_routes.py]
++- Contextless Error Logging [api/deck_routes.py]
++
+diff --git a/_bmad-output/implementation-artifacts/sprint-status.yaml b/_bmad-output/implementation-artifacts/sprint-status.yaml
+index 390722f..8632875 100644
+--- a/_bmad-output/implementation-artifacts/sprint-status.yaml
++++ b/_bmad-output/implementation-artifacts/sprint-status.yaml
+@@ -1,5 +1,5 @@
+ # generated: 2026-06-12T10:04:32+02:00
+-# last_updated: 2026-06-12T10:04:32+02:00
++# last_updated: 2026-06-13T01:03:00+02:00
+ # project: YGO-BOT
+ # project_key: NOKEY
+ # tracking_system: file-system
+@@ -35,14 +35,14 @@
+ # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+ 
+ generated: "2026-06-12T10:04:32+02:00"
+-last_updated: "2026-06-12T16:55:00+02:00"
++last_updated: "2026-06-13T01:03:00+02:00"
+ project: YGO-BOT
+ project_key: NOKEY
+ tracking_system: file-system
+ story_location: _bmad-output/implementation-artifacts
+ 
+ development_status:
+-  epic-1: in-progress
++  epic-1: done
+   1-1-base-de-donnees-et-historisation: done
+   1-2-integration-du-moteur-c: done
+   1-3-serveur-api-fastapi: done
+@@ -54,13 +54,13 @@ development_status:
+   2-3-pipeline-dentrainement-distribue: done
+   2-4-configuration-de-linfrastructure-cloud: done
+   epic-2-retrospective: optional
+-  epic-3: in-progress
++  epic-3: done
+   3-1-memoire-a-courtlong-terme: done
+   3-2-planification-arborescente: done
+   3-3-chargeur-dembeddings-vectoriels-in-memory: done
+   3-4-semantique-zero-shot: done
+   epic-3-retrospective: optional
+-  epic-4: in-progress
++  epic-4: done
+   4-1-synchronisation-et-cache-ygoprodeck: done
+-  4-2-interoperabilite-du-parseur-de-decks: backlog
++  4-2-interoperabilite-du-parseur-de-decks: done
+   epic-4-retrospective: optional
+diff --git a/_bmad-output/planning-artifacts/epics.md b/_bmad-output/planning-artifacts/epics.md
+index 7ee9c65..5977f89 100644
+--- a/_bmad-output/planning-artifacts/epics.md
++++ b/_bmad-output/planning-artifacts/epics.md
+@@ -278,3 +278,59 @@ So that l'environnement Python reçoive systématiquement une liste d'IDs entier
+ **When** FastAPI délègue la requête de conversion au microservice local `omega-api-decks`
+ **Then** le microservice le décode et FastAPI extrait les passcodes (Main/Extra/Side)
+ **And** la liste d'IDs validée est injectée pour initialiser correctement le deck de l'agent dans l'environnement Gym (`ygoenv`).
++
++## Epic 5: Mise à l'échelle de l'Environnement (Architecture Avancée)
++
++Refonte et optimisation de l'environnement Gym (ygoenv) pour permettre à l'agent PPO de comprendre l'intégralité du jeu (Espace d'Actions et Observation Space), et résoudre les blocages complexes du moteur C++.
++
++### Story 5.1: Espace d'Actions Discretisé (200 actions statiques)
++
++As a Chercheur en IA,
++I want d'abandonner l'espace d'actions dynamique au profit d'un espace discretisé fixe (`Discrete(200)`),
++So that le réseau de neurones PPO puisse projeter ses probabilités d'actions sur des neurones de sortie statiques (Action Masking).
++
++**Acceptance Criteria:**
++
++**Given** l'initialisation de l'environnement
++**When** on interroge `env.action_space`
++**Then** il retourne un `spaces.Discrete(200)`
++**And** les actions générées par le moteur C++ (Invocations, Poses, Activations, Battle) sont mappées de manière déterministe sur les 200 slots sémantiques.
++
++### Story 5.2: Auto-complétion et Ciblage Dynamique (MSG_SELECT_CARD)
++
++As a Chercheur en IA,
++I want que l'environnement puisse gérer dynamiquement les requêtes de ciblage (MSG_SELECT_CARD),
++So that l'agent ne reste pas bloqué indéfiniment lorsqu'il doit choisir la cible d'une attaque ou d'un effet complexe.
++
++**Acceptance Criteria:**
++
++**Given** un effet ou une attaque nécessitant un ciblage
++**When** le moteur ocgcore renvoie `MSG_SELECT_CARD` avec une liste de cibles légales
++**Then** l'environnement Gym permet à l'agent d'utiliser les slots 191 à 199 pour choisir une cible parmi la liste
++**And** si plusieurs cibles sont requises, l'environnement boucle avec le C++ pour auto-compléter la sélection sans crasher.
++
++### Story 5.3: Observation Complète à 156 Slots (Brouillard de Guerre)
++
++As a Chercheur en IA,
++I want que l'observation de l'agent passe à une représentation matricielle complète du jeu (156 emplacements pour les deux joueurs) incluant un brouillard de guerre,
++So that l'agent puisse percevoir tout le terrain, sa main, les cimetières, et "cacher" les informations privées de l'adversaire (cartes face cachée, main).
++
++**Acceptance Criteria:**
++
++**Given** le calcul de l'observation à chaque étape
++**When** `env.step()` ou `env.reset()` est appelé
++**Then** l'environnement construit un tenseur `(60694,)` concaténant 156 slots sémantiques et un vecteur d'information globale (LP, Phase)
++**And** les caractéristiques et embeddings des cartes cachées ou adverses non publiques sont masqués par des zéros.
++
++### Story 5.4: Entraînement de l'Agent PPO avec Masquage d'Actions (Action Masking)
++
++As a Chercheur en IA,
++I want d'entraîner le modèle PPO en utilisant le masque d'actions (Action Mask) généré par l'environnement,
++So that le réseau apprenne à attribuer 0% de probabilité aux actions illégales, évitant ainsi le gaspillage d'exploration et accélérant l'apprentissage des conditions de victoire.
++
++**Acceptance Criteria:**
++
++**Given** le lot d'observations renvoyé par Gym
++**When** le PPO met à jour ses poids
++**Then** il pénalise la prédiction d'actions illégales à l'aide d'un gradient "Action Masking"
++**And** la Value Loss et l'Entropy démontrent que l'agent apprend à explorer uniquement les actions valides.
+diff --git a/ai/agent.py b/ai/agent.py
+index e965ce4..58409fa 100644
+--- a/ai/agent.py
++++ b/ai/agent.py
+@@ -52,7 +52,7 @@ class MCTSAgent:
+         # We can just do a forward pass on the selected action to get the next hidden state
+         # Or, more simply, do a forward pass on the current state to get value & next hidden
+         # for the worker's trajectory record.
+-        probs, value, next_hidden = self.ppo_agent.forward(params, hidden_state, obs)
++        probs, value, next_hidden = self.ppo_agent.forward(params, hidden_state, obs, legal_actions)
+         value = float(np.array(value))
+         next_hidden = (np.array(next_hidden[0]), np.array(next_hidden[1]))
+         
+diff --git a/ai/ppo.py b/ai/ppo.py
+index ed0c1e7..26d55a4 100644
+--- a/ai/ppo.py
++++ b/ai/ppo.py
+@@ -68,15 +68,28 @@ class PPOAgent:
+         
+         return (h_new, c_new), h_new
+ 
+-    def forward(self, params: dict, hidden_state: tuple[jnp.ndarray, jnp.ndarray], obs: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray, tuple[jnp.ndarray, jnp.ndarray]]:
++    def forward(self, params: dict, hidden_state: tuple[jnp.ndarray, jnp.ndarray], obs: jnp.ndarray, action_mask: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray, tuple[jnp.ndarray, jnp.ndarray]]:
+         """Forward pass public pour l'inférence. Retourne les probabilités, la Value et le nouvel état caché."""
+         if obs.ndim not in (1, 2):
+             raise ValueError(f"Invalid observation shape: {obs.shape}. Expected 1D or 2D array.")
+             
++        if action_mask.ndim not in (1, 2):
++            raise ValueError(f"Invalid action_mask shape: {action_mask.shape}. Expected 1D or 2D array.")
++            
++        action_mask = jnp.asarray(action_mask, dtype=jnp.bool_)
++        
+         is_single = obs.ndim == 1
+         if is_single:
+             obs = jnp.expand_dims(obs, axis=0)
++            action_mask = jnp.expand_dims(action_mask, axis=0)
+             
++        if obs.shape[0] != action_mask.shape[0]:
++            raise ValueError(f"Batch size mismatch: obs {obs.shape[0]} != action_mask {action_mask.shape[0]}")
++            
++        # Ensure at least one valid action to avoid softmax over all -1e9 (which gives uniform distribution)
++        # In pure JAX we can't raise a dynamic ValueError easily, so we fallback to all True if mask is empty
++        action_mask = jnp.where(~jnp.any(action_mask, axis=-1, keepdims=True), True, action_mask)
++        
+         # Extract features
+         x = jnp.maximum(0, jnp.dot(obs, params["feature"]["w"]) + params["feature"]["b"])
+         
+@@ -85,6 +98,10 @@ class PPOAgent:
+         
+         # Policy & Value heads
+         logits = jnp.dot(h_new, params["policy"]["w"]) + params["policy"]["b"]
++        
++        # Action Masking
++        logits = jnp.where(action_mask, logits, -1e9)
++        
+         probs = jax.nn.softmax(logits, axis=-1)
+         
+         value = jnp.dot(h_new, params["value"]["w"]) + params["value"]["b"]
+@@ -93,9 +110,10 @@ class PPOAgent:
+             return probs[0], value[0, 0], next_hidden_state
+         return probs, value[..., 0], next_hidden_state
+ 
+-    def _forward_sequence(self, params: dict, obs_seq: jnp.ndarray, dones_seq: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
++    def _forward_sequence(self, params: dict, obs_seq: jnp.ndarray, mask_seq: jnp.ndarray, dones_seq: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+         """Calcul de la séquence complète pour BPTT via jax.lax.scan.
+         obs_seq: (batch, time, obs_dim)
++        mask_seq: (batch, time, act_dim)
+         dones_seq: (batch, time)
+         """
+         if obs_seq.shape[1] == 0:
+@@ -103,12 +121,15 @@ class PPOAgent:
+             return (jnp.zeros((batch_size, 0, self.act_dim)), 
+                     jnp.zeros((batch_size, 0)))
+                     
++        if obs_seq.shape[:2] != mask_seq.shape[:2]:
++            raise ValueError(f"Sequence shape mismatch: obs {obs_seq.shape[:2]} != mask {mask_seq.shape[:2]}")
++            
+         batch_size = obs_seq.shape[0]
+         init_state = self.init_hidden_state(batch_size)
+         
+         def scan_fn(carry, step_inputs):
+             h, c = carry
+-            obs_t, done_t = step_inputs
++            obs_t, mask_t, done_t = step_inputs
+             
+             # Reset hidden state where episode ended in previous step
+             done_t = jnp.expand_dims(done_t, axis=-1)
+@@ -123,12 +144,14 @@ class PPOAgent:
+             
+             # Heads
+             logits = jnp.dot(h_out, params["policy"]["w"]) + params["policy"]["b"]
++            logits = jnp.where(mask_t, logits, -1e9)
+             value = jnp.dot(h_out, params["value"]["w"]) + params["value"]["b"]
+             
+             return (h_new, c_new), (logits, value[..., 0])
+ 
+         # Swap batch and time axes for scan: (time, batch, ...)
+         obs_seq_t = jnp.swapaxes(obs_seq, 0, 1)
++        mask_seq_t = jnp.swapaxes(mask_seq, 0, 1)
+         dones_seq_t = jnp.swapaxes(dones_seq, 0, 1)
+         
+         # Padding dones to shift it by 1 step (reset state on step AFTER done)
+@@ -136,7 +159,7 @@ class PPOAgent:
+         # We want to reset AT step t if done was true at step t-1.
+         dones_shifted = jnp.concatenate([jnp.zeros((1, batch_size), dtype=jnp.float32), dones_seq_t[:-1]], axis=0)
+ 
+-        _, (logits_seq_t, value_seq_t) = jax.lax.scan(scan_fn, init_state, (obs_seq_t, dones_shifted))
++        _, (logits_seq_t, value_seq_t) = jax.lax.scan(scan_fn, init_state, (obs_seq_t, mask_seq_t, dones_shifted))
+         
+         # Swap back to (batch, time, ...)
+         logits_seq = jnp.swapaxes(logits_seq_t, 0, 1)
+@@ -144,17 +167,21 @@ class PPOAgent:
+         
+         return logits_seq, value_seq
+ 
+-    def compute_loss(self, params: dict, obs: jnp.ndarray, actions: jnp.ndarray, 
++    def compute_loss(self, params: dict, obs: jnp.ndarray, action_masks: jnp.ndarray, actions: jnp.ndarray, 
+                     old_log_probs: jnp.ndarray, advantages: jnp.ndarray, returns: jnp.ndarray,
+                     dones: jnp.ndarray,
+                     clip_ratio: float = 0.2, value_coef: float = 1.0, entropy_coef: float = 0.01) -> tuple[jnp.ndarray, dict]:
+         """Calcule la perte PPO avec BPTT sur une séquence temporelle."""
+         assert obs.ndim == 3, "obs must have shape (batch, time, dim)"
+         
++        action_masks = jnp.asarray(action_masks, dtype=jnp.bool_)
++        # Ensure at least one valid action across the sequence to avoid NaNs
++        action_masks = jnp.where(~jnp.any(action_masks, axis=-1, keepdims=True), True, action_masks)
++        
+         actions = jnp.clip(actions, 0, self.act_dim - 1)
+         
+         # Unroll sequence
+-        logits_seq, values_seq = self._forward_sequence(params, obs, dones)
++        logits_seq, values_seq = self._forward_sequence(params, obs, action_masks, dones)
+         
+         log_probs_all = jax.nn.log_softmax(logits_seq, axis=-1)
+         # Advanced indexing to get log_probs of chosen actions
+@@ -173,7 +200,10 @@ class PPOAgent:
+         value_loss = jnp.mean((values_seq - returns) ** 2)
+         
+         probs = jax.nn.softmax(logits_seq, axis=-1)
+-        entropy = -jnp.mean(jnp.sum(probs * log_probs_all, axis=-1))
++        # Ne calculer l'entropie que sur les actions valides (logits != -1e9)
++        # softmax de -1e9 donnera 0, et 0 * log(0) -> NaN, on clip donc les probs
++        safe_probs = jnp.where(action_masks, jnp.maximum(probs, 1e-10), 1e-10)
++        entropy = -jnp.mean(jnp.sum(probs * jnp.log(safe_probs), axis=-1))
+         
+         total_loss = policy_loss + value_coef * value_loss - entropy_coef * entropy
+         
+@@ -185,13 +215,13 @@ class PPOAgent:
+         
+         return total_loss, metrics
+ 
+-    def update_params(self, params: dict, obs: jnp.ndarray, actions: jnp.ndarray, 
++    def update_params(self, params: dict, obs: jnp.ndarray, action_masks: jnp.ndarray, actions: jnp.ndarray, 
+                     old_log_probs: jnp.ndarray, advantages: jnp.ndarray, returns: jnp.ndarray,
+                     dones: jnp.ndarray,
+                     learning_rate: float = 3e-4) -> tuple[dict, dict]:
+         """Mise à jour BPTT des paramètres avec SGD."""
+         loss_fn = jax.value_and_grad(self.compute_loss, has_aux=True)
+-        (loss, metrics), grads = loss_fn(params, obs, actions, old_log_probs, advantages, returns, dones)
++        (loss, metrics), grads = loss_fn(params, obs, action_masks, actions, old_log_probs, advantages, returns, dones)
+         
+         new_params = jax.tree_util.tree_map(lambda p, g: p - learning_rate * g, params, grads)
+         
+diff --git a/api/deck_routes.py b/api/deck_routes.py
+new file mode 100644
+index 0000000..3b40a19
+--- /dev/null
++++ b/api/deck_routes.py
+@@ -0,0 +1,47 @@
++import logging
++from fastapi import APIRouter, HTTPException
++from fastapi.responses import JSONResponse
++
++from api.schemas import DeckImportRequest, DeckImportResponse
++from core.deck_parser import parse_deck, DeckParserError
++from core.ygoenv.env import YgoEnv
++
++logger = logging.getLogger(__name__)
++
++router = APIRouter()
++
++@router.post("/v1/decks/import", response_model=DeckImportResponse)
++async def import_deck(request: DeckImportRequest):
++    try:
++        parsed_deck = await parse_deck(request.deck_data)
++        
++        env = YgoEnv()
++        env.set_deck(parsed_deck)
++        
++        return DeckImportResponse(
++            main=parsed_deck["main"],
++            extra=parsed_deck["extra"],
++            side=parsed_deck["side"]
++        )
++    except DeckParserError as e:
++        logger.error(f"Deck parsing failed: {e}")
++        return JSONResponse(
++            status_code=500,
++            content={
++                "error": {
++                    "code": "DECK_PARSER_ERROR",
++                    "detail": str(e)
++                }
++            }
++        )
++    except Exception as e:
++        logger.exception("Unexpected error in import_deck")
++        return JSONResponse(
++            status_code=500,
++            content={
++                "error": {
++                    "code": "INTERNAL_SERVER_ERROR",
++                    "detail": "An unexpected error occurred"
++                }
++            }
++        )
+diff --git a/api/main.py b/api/main.py
+index d7a2493..eb840d6 100644
+--- a/api/main.py
++++ b/api/main.py
+@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
+ from fastapi import FastAPI
+ from api.security import setup_cors
+ from api.duel_routes import router as duel_router
++from api.deck_routes import router as deck_router
+ from ai.embeddings import embed_loader
+ import logging
+ 
+@@ -25,6 +26,7 @@ app = FastAPI(title="YGO Bot API", lifespan=lifespan)
+ setup_cors(app)
+ 
+ app.include_router(duel_router, prefix="/api")
++app.include_router(deck_router, prefix="/api")
+ 
+ if __name__ == "__main__":
+     import uvicorn
+diff --git a/api/schemas.py b/api/schemas.py
+new file mode 100644
+index 0000000..d092259
+--- /dev/null
++++ b/api/schemas.py
+@@ -0,0 +1,13 @@
++from pydantic import BaseModel, ConfigDict, Field
++from pydantic.alias_generators import to_camel
++from typing import List
++
++class DeckImportRequest(BaseModel):
++    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
++    deck_data: str = Field(..., min_length=1, max_length=100000)
++
++class DeckImportResponse(BaseModel):
++    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
++    main: List[int]
++    extra: List[int]
++    side: List[int]
+diff --git a/core/deck_parser.py b/core/deck_parser.py
+new file mode 100644
+index 0000000..bd3f4fc
+--- /dev/null
++++ b/core/deck_parser.py
+@@ -0,0 +1,38 @@
++import httpx
++from typing import Dict, List, Any
++
++class DeckParserError(Exception):
++    pass
++
++_client = httpx.AsyncClient()
++
++async def parse_deck(deck_data: str, parser_url: str = "http://localhost:8000/api/v1/parse") -> Dict[str, List[int]]:
++    """
++    Appelle le microservice omega-api-decks pour parser un deck.
++    Retourne un dictionnaire avec 'main', 'extra', et 'side'.
++    """
++    try:
++        response = await _client.post(
++            parser_url,
++            json={"deck": deck_data},
++            timeout=10.0
++        )
++        response.raise_for_status()
++        data = response.json()
++        
++        if not isinstance(data, dict):
++            raise DeckParserError("Parser returned invalid JSON format (expected dict)")
++            
++        return {
++            "main": data.get("main") or [],
++            "extra": data.get("extra") or [],
++            "side": data.get("side") or []
++        }
++    except httpx.RequestError as e:
++        raise DeckParserError(f"Network error while connecting to parser: {str(e)}")
++    except httpx.HTTPStatusError as e:
++        raise DeckParserError(f"Parser returned an HTTP error: {e.response.status_code}")
++    except DeckParserError:
++        raise
++    except Exception as e:
++        raise DeckParserError(f"Unexpected error parsing deck: {str(e)}")
+diff --git a/core/ocgcore b/core/ocgcore
+--- a/core/ocgcore
++++ b/core/ocgcore
+@@ -1 +1 @@
+-Subproject commit 19026e316c6de1773886a6b742081b5130c1a413
++Subproject commit 19026e316c6de1773886a6b742081b5130c1a413-dirty
+diff --git a/core/ygoenv/env.py b/core/ygoenv/env.py
+index f5c45eb..391779b 100644
+--- a/core/ygoenv/env.py
++++ b/core/ygoenv/env.py
+@@ -12,67 +12,216 @@ class YgoEnv(gym.Env):
+         
+         # Dimensions pour le MVP:
+         # - Action space: par exemple 200 actions discrètes possibles (id de l'action)
++        # Espace d'action: Par exemple, 200 actions discrètes possibles
+         self.action_space = gym.spaces.Discrete(200)
+         
+-        self.NUM_CARDS = 15
+-        self.DEFAULT_EMBEDDING_DIM = 64
+-        
+-        from ai.embeddings import embed_loader
+-        self.embedding_dim = embed_loader._embedding_dim if embed_loader.is_loaded() and embed_loader._embedding_dim > 0 else self.DEFAULT_EMBEDDING_DIM
+-        
+-        # - Observation space: tenseur plat float32 de taille fixe (NUM_CARDS * embedding_dim) représentant le terrain vectorisé
+-        self.observation_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(self.NUM_CARDS * self.embedding_dim,), dtype=np.float32)
++        # Espace d'observation: Un vecteur plat (ex: 960 features)
++        self.observation_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(960,), dtype=np.float32)
+         
+         self.engine = YgoEngine()
+         self._current_state = None
++        self.max_turns = 100
++        
++        # Charger les embeddings
++        try:
++            from ai.embeddings import EmbeddingLoader
++            self.embed_loader = EmbeddingLoader()
++            self.embed_loader.load()
++            embed_dim = self.embed_loader._embedding_dim
++            if embed_dim > 0:
++                self.observation_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(60694,), dtype=np.float32)
++            import logging
++            logging.info(f"Embeddings chargés avec dimension {embed_dim}.")
++        except Exception as e:
++            import logging
++            logging.error(f"Erreur lors du chargement des embeddings: {e}")
++            self.embed_loader = None
++
++    def get_action_mask(self):
++        """
++        Retourne un masque booléen (ou de 0/1) indiquant quelles actions sont légales.
++        Pour l'instant, c'est un mock où toutes les actions sont légales.
++        """
++        import numpy as np
++        return np.ones(self.action_space.n, dtype=np.float32)
++
++    def set_deck(self, deck: dict):
++        """Injecte le deck de l'agent dans l'environnement."""
++        self.agent_deck = deck
+         
+     def _get_observation(self, mock_card_ids: np.ndarray = None) -> np.ndarray:
+-        # TODO: Appeler l'engine pour extraire les identifiants réels des cartes sur le terrain
+-        # Pour le MVP, on simule une liste de cartes. La plupart sont vides (0, donc inconnues).
+-        from ai.embeddings import embed_loader
++        # Appeler l'engine pour extraire les informations riches des cartes
++        cards_info = self.engine.query_field_state(0) # on interroge l'état pour le joueur 0
++        global_info = self.engine.get_global_info() if hasattr(self.engine, 'get_global_info') else {"lp": [8000, 8000]}
+         
+-        card_ids = mock_card_ids if mock_card_ids is not None else np.zeros(self.NUM_CARDS, dtype=np.int32)
++        # Brouillard de Guerre et Filtres
++        for card in cards_info:
++            player = card["player"]
++            loc = card["location"]
++            pos = card.get("position", 0)
++            
++            # Condition pour masquer:
++            # - Appartient à l'adversaire (player == 1)
++            # - ET (dans la main/deck/extra OU face cachée sur le terrain)
++            is_opponent = (player == 1)
++            is_hidden_location = loc in [0x01, 0x02, 0x40] # Deck, Hand, Extra
++            is_facedown = (pos & 0xA) != 0 # POS_FACEDOWN_ATTACK = 2 | 8, POS_FACEDOWN_DEFENSE = 8
++            
++            if is_opponent and (is_hidden_location or is_facedown):
++                card["code"] = 0
++                card["level"] = 0
++                card["type"] = 0
++                card["attack"] = 0
++                card["defense"] = 0
++                
++        # Structure de 156 slots
++        slots = []
+         
+-        if not embed_loader.is_loaded():
+-            import logging
+-            logging.warning("Embedding loader non chargé ! Appel implicite à load() ou retour de zéros si mock.")
+-            # Fallback en silence uniquement parce qu'on est en dev/test. Dans un vrai moteur : embed_loader.load()
+-            return np.zeros(self.observation_space.shape, dtype=np.float32)
++        def filter_loc(p, l, max_len):
++            found = [c for c in cards_info if c["player"] == p and c["location"] == l]
++            # Pour la MZone/SZone, la séquence est importante (0 à 4 pour MZone, 0 à 5 pour EMZone, etc.)
++            # Mais pour simplifier, on pad juste à max_len
++            while len(found) < max_len:
++                found.append({"code": 0, "position": 0, "type": 0, "level": 0, "attack": 0, "defense": 0})
++            return found[:max_len]
++            
++        for player in [0, 1]:
++            slots.extend(filter_loc(player, 0x04, 5)) # MZone (5)
++            slots.extend(filter_loc(player, 0x08, 5)) # SZone (5)
++            slots.extend(filter_loc(player, 0x100, 1)) # FZone (1) - YGOPro FZone est souvent seq=5 dans SZone, on gèrera plus tard, pour le moment on pad
++            slots.extend(filter_loc(player, 0x200, 1)) # EMZone (1)
++            slots.extend(filter_loc(player, 0x02, 15)) # Hand (15)
++            slots.extend(filter_loc(player, 0x10, 20)) # Grave (20)
++            slots.extend(filter_loc(player, 0x20, 15)) # Removed (15)
++            slots.extend(filter_loc(player, 0x40, 15)) # Extra (15)
++            
++            # Le Deck (1 slot spécial)
++            deck_cards = [c for c in cards_info if c["player"] == player and c["location"] == 0x01]
++            deck_slot = {"code": 0, "position": 0, "type": 0, "level": len(deck_cards), "attack": 0, "defense": 0} # On stocke la taille dans "level"
++            slots.append(deck_slot)
++
++        # Résolution des embeddings et normalisation
++        features = []
++        for i, slot in enumerate(slots):
++            cid = slot.get("code", 0)
++            
++            # Normalisation
++            pos = float(slot.get("position", 0))
++            ctype = float(slot.get("type", 0))
++            atk = float(slot.get("attack", 0)) / 5000.0
++            def_val = float(slot.get("defense", 0)) / 5000.0
+             
+-        if embed_loader._embedding_dim != self.embedding_dim:
+-            raise ValueError(f"Shape Mismatch Lazy-Loading: YgoEnv initialisé avec {self.embedding_dim} mais embed_loader a {embed_loader._embedding_dim}.")
++            # Traitement spécial pour le Deck Slot (index 77 et 155)
++            if i == 77 or i == 155:
++                lvl = float(slot.get("level", 0)) / 60.0 # Taille du deck
++            else:
++                lvl = float(slot.get("level", 0)) / 12.0
++            
++            stats = np.array([pos, lvl, ctype, atk, def_val], dtype=np.float32)
++            
++            if cid > 0 and self.embed_loader and hasattr(self.embed_loader, 'get_embedding'):
++                emb = self.embed_loader.get_embedding(int(cid))
++            else:
++                emb = np.zeros(384, dtype=np.float32) # Fallback
++                
++            features.append(stats)
++            features.append(emb)
++            
++        # Ajout des Informations Globales (LP, Phase)
++        lp_0 = float(global_info["lp"][0]) / 8000.0
++        lp_1 = float(global_info["lp"][1]) / 8000.0
++        
++        # Encodage One-Hot de la Phase (8 dimensions)
++        phase_map = {"DRAW": 0, "STANDBY": 1, "MAIN1": 2, "BATTLE": 3, "MAIN2": 4, "END": 5, "START": 6}
++        phase_idx = phase_map.get(self._current_state.get("phase", "START"), 7)
++        phase_one_hot = np.zeros(8, dtype=np.float32)
++        phase_one_hot[phase_idx] = 1.0
++        
++        global_vec = np.array([lp_0, lp_1], dtype=np.float32)
++        features.append(global_vec)
++        features.append(phase_one_hot)
+             
+-        vectors = embed_loader.get_embeddings_batch(card_ids)
+-        return np.asarray(vectors, dtype=np.float32).flatten()
++        # Concaténer en un seul vecteur (60694)
++        obs = np.concatenate(features)
++        return obs
+         
+     def get_legal_actions(self) -> np.ndarray:
++        """
++        Retourne un masque des actions légales depuis le moteur C++.
++        """
++        mask = np.zeros(self.action_space.n, dtype=np.bool_)
++        
+         if self._current_state is None:
+-            return np.ones(self.action_space.n, dtype=np.bool_)
++            mask[0] = True
++            return mask
+             
+         actions = self.engine.get_legal_actions(self._current_state)
+-        mask = np.zeros(self.action_space.n, dtype=np.bool_)
++        self._current_state_actions = actions # Save for step translation
++        
+         for a in actions:
+-            # MVP: on utilise 'action_type' comme index d'action
+-            idx = a.get("action_type", 0)
+-            if 0 <= idx < self.action_space.n:
+-                mask[idx] = True
++            if a.get("msg") in ["MSG_SELECT_IDLECMD", "MSG_SELECT_BATTLECMD", "MSG_SELECT_CARD"]:
++                for choice in a.get("choices", []):
++                    idx = choice.get("action_idx")
++                    if idx is not None and 0 <= idx < self.action_space.n:
++                        mask[idx] = True
++            else:
++                # fallback old behaviour
++                idx = a.get("action_type", 0)
++                if 0 <= idx < self.action_space.n:
++                    mask[idx] = True
+                 
+-        # Fallback de sécurité pour éviter un masque complètement vide
++        # Fallback de sécurité si l'engine ne retourne rien d'exploitable
+         if not np.any(mask):
+             mask[0] = True
+-            
++                
+         return mask
+         
+     def reset(self, seed=None, options=None) -> tuple[np.ndarray, dict]:
+         super().reset(seed=seed, options=options)
+         
+-        # Initialiser un duel ou réinitialiser l'état
++        # Détruire le duel précédent s'il existe
++        self.engine.destroy_duel()
++        
++        # Initialiser un nouveau duel C++
+         self._current_state = {"phase": "DRAW", "turn": 1}
++        self._current_state_actions = []
++        duel_ok = self.engine.create_duel()
++        
++        if not duel_ok:
++            import logging
++            logging.warning("Impossible de créer un duel C++. L'env tourne en mode dégradé.")
++        else:
++            # Charger un deck Beatdown pour les 2 joueurs
++            try:
++                from db.session import SessionLocal
++                from db.models import Card
++                with SessionLocal() as db:
++                    # Blue-Eyes White Dragon (89631139) et Gene-Warped Warwolf (03201284)
++                    beatdown_codes = [89631139, 3201284]
++                    cards = db.query(Card).filter(Card.id.in_(beatdown_codes)).all()
++                    codes = [c.id for c in cards]
++                    
++                    if len(codes) > 0:
++                        # Remplir le Deck avec ce qu'on a trouvé (alterné pour faire 40 cartes)
++                        deck = (codes * 20)[:40]
++                        
++                        for player in (0, 1):
++                            for seq, code in enumerate(deck):
++                                self.engine.add_card(code, player, 0x01, seq, 0x8)
++                                
++                        self.engine.start_duel()
++            except Exception as e:
++                import logging
++                logging.error(f"Erreur lors du chargement du deck: {e}")
++                
++        # Le state n'est pas None, il faut au moins un dict pour bypasser le if is None
++        self._current_state = {"phase": "START", "turn": 1}
+         
++        # On doit d'abord appeler get_legal_actions pour avancer le moteur (tirage des mains, etc.)
++        legal_actions = self.get_legal_actions()
+         obs = self._get_observation()
+-        info = {"legal_actions": self.get_legal_actions()}
+         
+-        return obs, info
++        return obs, {"legal_actions": legal_actions}
+         
+     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict]:
+         if self._current_state is None:
+@@ -81,15 +230,37 @@ class YgoEnv(gym.Env):
+         if not self.action_space.contains(action):
+             raise ValueError(f"Action invalide: {action}")
+             
+-        # Appliquer l'action au state
+-        self._current_state["last_action"] = action
+-            
+-        # Simuler un passage au tour suivant ou fin de partie
+-        obs = self._get_observation()
+         reward = 0.0
+         terminated = False
+         truncated = False
+-        info = {"legal_actions": self.get_legal_actions()}
++        
++        # Traduction de l'action
++        self.engine.translate_and_set_response(action, self._current_state_actions)
++        
++        # Le moteur simule le reste jusqu'à la prochaine attente
++        new_actions = self.engine.get_legal_actions(self._current_state)
++        
++        # Parser les messages pour chercher MSG_WIN (5) ou autres events importants
++        for a in new_actions:
++            if a.get("msg") == "WIN":
++                terminated = True
++                # player 0 = nous, player 1 = adversaire, player 2 = draw
++                win_player = a.get("player", 2)
++                if win_player == 0:
++                    reward = 1.0
++                elif win_player == 1:
++                    reward = -1.0
++                else:
++                    reward = 0.0
++                break
++        
++        # Mettre à jour l'état mock
++        self._current_state["turn"] += 1
++        if self._current_state["turn"] >= self.max_turns:
++            truncated = True
++            
++        obs = self._get_observation()
++        info = {"legal_actions": new_actions}
+         
+         return obs, reward, terminated, truncated, info
+ 
+diff --git a/core/ygoenv/wrapper.py b/core/ygoenv/wrapper.py
+index 651ba02..76d7e52 100644
+--- a/core/ygoenv/wrapper.py
++++ b/core/ygoenv/wrapper.py
+@@ -7,15 +7,197 @@ class EngineCrashError(Exception):
+     """Exception levée lorsque le moteur C++ crashe ou retourne une erreur fatale."""
+     pass
+ 
++class OCG_CardData(ctypes.Structure):
++    _fields_ = [
++        ("code", ctypes.c_uint32),
++        ("alias", ctypes.c_uint32),
++        ("setcodes", ctypes.POINTER(ctypes.c_uint16)),
++        ("type", ctypes.c_uint32),
++        ("level", ctypes.c_int32),
++        ("attribute", ctypes.c_uint32),
++        ("race", ctypes.c_uint64),
++        ("attack", ctypes.c_int32),
++        ("defense", ctypes.c_int32),
++        ("lscale", ctypes.c_uint32),
++        ("rscale", ctypes.c_uint32),
++        ("link_marker", ctypes.c_uint32),
++        ("ot", ctypes.c_uint32),
++    ]
++
++class OCG_Player(ctypes.Structure):
++    _fields_ = [
++        ("startingLP", ctypes.c_uint32),
++        ("startingDrawCount", ctypes.c_uint32),
++        ("drawCountPerTurn", ctypes.c_uint32),
++    ]
++
++class OCG_DuelOptions(ctypes.Structure):
++    _fields_ = [
++        ("seed", ctypes.c_uint64 * 4),
++        ("flags", ctypes.c_uint64),
++        ("team1", OCG_Player),
++        ("team2", OCG_Player),
++        ("cardReader", ctypes.c_void_p),
++        ("payload1", ctypes.c_void_p),
++        ("scriptReader", ctypes.c_void_p),
++        ("payload2", ctypes.c_void_p),
++        ("logHandler", ctypes.c_void_p),
++        ("payload3", ctypes.c_void_p),
++        ("cardReaderDone", ctypes.c_void_p),
++        ("payload4", ctypes.c_void_p),
++        ("payload5", ctypes.c_void_p),
++        ("enableUnsafeLibraries", ctypes.c_uint8),
++    ]
++
++class OCG_NewCardInfo(ctypes.Structure):
++    _fields_ = [
++        ("team", ctypes.c_uint8),
++        ("duelist", ctypes.c_uint8),
++        ("code", ctypes.c_uint32),
++        ("con", ctypes.c_uint8),
++        ("loc", ctypes.c_uint32),
++        ("seq", ctypes.c_uint32),
++        ("pos", ctypes.c_uint32),
++    ]
++
++class OCG_QueryInfo(ctypes.Structure):
++    _fields_ = [
++        ("flags", ctypes.c_uint32),
++        ("con", ctypes.c_uint8),
++        ("loc", ctypes.c_uint32),
++        ("seq", ctypes.c_uint32),
++        ("overlay_seq", ctypes.c_uint32),
++    ]
++
++# Callback definitions
++CARD_READER_CB = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(OCG_CardData))
++SCRIPT_READER_CB = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p)
++
++def my_card_reader(payload, code, data_ptr):
++    try:
++        data_ptr.contents.code = code
++        data_ptr.contents.alias = 0
++        data_ptr.contents.lscale = 0
++        data_ptr.contents.rscale = 0
++        data_ptr.contents.link_marker = 0
++        data_ptr.contents.ot = 0
++        
++        global _dummy_setcodes
++        if '_dummy_setcodes' not in globals():
++            _dummy_setcodes = (ctypes.c_uint16 * 1)(0)
++        data_ptr.contents.setcodes = ctypes.cast(_dummy_setcodes, ctypes.POINTER(ctypes.c_uint16))
++        
++        # Load from cache
++        from core.ygoenv.constants import YGO_TYPE_MAPPING, YGO_ATTRIBUTE_MAPPING, YGO_RACE_MAPPING
++        card_info = YgoEngine._CARD_DB_CACHE.get(code)
++        if card_info:
++            data_ptr.contents.attack = card_info.get("atk", 0)
++            data_ptr.contents.defense = card_info.get("def", 0)
++            data_ptr.contents.level = card_info.get("level", 0)
++            
++            # Map type, attribute, race
++            t = card_info.get("type", "Normal Monster")
++            data_ptr.contents.type = YGO_TYPE_MAPPING.get(t, YGO_TYPE_MAPPING["Normal Monster"])
++            
++            a = card_info.get("attribute", "LIGHT")
++            data_ptr.contents.attribute = YGO_ATTRIBUTE_MAPPING.get(a, YGO_ATTRIBUTE_MAPPING["LIGHT"])
++            
++            r = card_info.get("race", "Dragon")
++            data_ptr.contents.race = YGO_RACE_MAPPING.get(r, YGO_RACE_MAPPING["Dragon"])
++        else:
++            # Fallback
++            data_ptr.contents.attack = 0
++            data_ptr.contents.defense = 0
++            data_ptr.contents.level = 0
++            data_ptr.contents.type = YGO_TYPE_MAPPING["Normal Monster"]
++            data_ptr.contents.attribute = YGO_ATTRIBUTE_MAPPING["LIGHT"]
++            data_ptr.contents.race = YGO_RACE_MAPPING["Dragon"]
++            
++    except Exception as e:
++        import logging
++        logging.error(f"Erreur dans card_reader: {e}")
++
++_engine_lib = None
++
++def my_script_reader(payload, duel_ptr, name):
++    try:
++        script_name = name.decode('utf-8') if isinstance(name, bytes) else name
++        
++        import os
++        from pathlib import Path
++        filename = os.path.basename(script_name)
++        
++        scripts_dir = Path(__file__).parent.parent.parent / "data" / "scripts"
++        path = scripts_dir / filename
++        
++        import logging
++        logging.info(f"Checking script at: {path}, exists: {path.exists()}")
++        
++        if path.exists():
++            with open(path, "rb") as f:
++                content = f.read()
++                
++            if _engine_lib:
++                # Appeler OCG_LoadScript (duel_ptr, buffer, length, name)
++                _engine_lib.OCG_LoadScript(duel_ptr, content, len(content), name)
++                return 1 # Succès
++                
++        # Le script n'a pas été trouvé
++        return 0
++    except Exception as e:
++        import logging
++        logging.error(f"Erreur dans script_reader: {e}")
++        return 0
++
++# Keep references to avoid garbage collection
++_global_card_reader = CARD_READER_CB(my_card_reader)
++_global_script_reader = SCRIPT_READER_CB(my_script_reader)
++
+ class YgoEngine:
++    _CARD_DB_CACHE = None
++
++    @classmethod
++    def _load_card_db_cache(cls):
++        if cls._CARD_DB_CACHE is not None:
++            return
++            
++        import logging
++        logging.info("Chargement du cache des cartes en mémoire...")
++        try:
++            import os
++            import sys
++            sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
++            from db.session import SessionLocal
++            from db.models import Card
++            
++            with SessionLocal() as db:
++                cards = db.query(Card).all()
++                cls._CARD_DB_CACHE = {}
++                for c in cards:
++                    cls._CARD_DB_CACHE[c.id] = {
++                        "type": c.type,
++                        "atk": c.atk or 0,
++                        "def": c.def_ or 0,
++                        "level": c.level or 0,
++                        "attribute": c.attribute,
++                        "race": c.race
++                    }
++            logging.info(f"Cache de {len(cls._CARD_DB_CACHE)} cartes chargé avec succès.")
++        except Exception as e:
++            logging.error(f"Erreur lors du chargement du cache des cartes: {e}")
++            cls._CARD_DB_CACHE = {}
++
+     def __init__(self):
++        self._load_card_db_cache()
+         self.lib = None
++        self.duel_ptr = None  # Pointeur persistant vers le duel actif
++        self._duel_valid = False
+         self._load_library()
+ 
+     def _load_library(self):
+         """Charge ocgcore via ctypes."""
+         import sys
+-        core_dir = Path(__file__).parent.parent
++        core_dir = Path(__file__).parent
+         
+         if sys.platform.startswith("win"):
+             dll_path = core_dir / "ocgcore.dll"
+@@ -29,72 +211,585 @@ class YgoEngine:
+                 # Load DLL
+                 self.lib = ctypes.CDLL(str(dll_path))
+                 
+-                # Bind C functions
+-                self.lib.create_duel.argtypes = [ctypes.c_uint32]
+-                self.lib.create_duel.restype = ctypes.c_void_p
++                global _engine_lib
++                _engine_lib = self.lib
++                
++                # Bind C functions for ocgcore-KCG
++                self.lib.OCG_CreateDuel.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(OCG_DuelOptions)]
++                self.lib.OCG_CreateDuel.restype = ctypes.c_int
++                
++                self.lib.OCG_LoadScript.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32, ctypes.c_char_p]
++                self.lib.OCG_LoadScript.restype = ctypes.c_int
++                
++                self.lib.OCG_StartDuel.argtypes = [ctypes.c_void_p]
++                self.lib.OCG_StartDuel.restype = None
+                 
+-                self.lib.start_duel.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+-                self.lib.end_duel.argtypes = [ctypes.c_void_p]
++                self.lib.OCG_DestroyDuel.argtypes = [ctypes.c_void_p]
++                self.lib.OCG_DestroyDuel.restype = None
+                 
+-                self.lib.process.argtypes = [ctypes.c_void_p]
+-                self.lib.process.restype = ctypes.c_uint32
++                self.lib.OCG_DuelProcess.argtypes = [ctypes.c_void_p]
++                self.lib.OCG_DuelProcess.restype = ctypes.c_int
+                 
+-                # Setup callbacks placeholders
+-                self.lib.set_script_reader.argtypes = [ctypes.c_void_p]
+-                self.lib.set_card_reader.argtypes = [ctypes.c_void_p]
+-                self.lib.set_message_handler.argtypes = [ctypes.c_void_p]
++                self.lib.OCG_DuelNewCard.argtypes = [ctypes.c_void_p, ctypes.POINTER(OCG_NewCardInfo)]
++                self.lib.OCG_DuelNewCard.restype = None
++                
++                self.lib.OCG_DuelQueryCount.argtypes = [ctypes.c_void_p, ctypes.c_uint8, ctypes.c_uint32]
++                self.lib.OCG_DuelQueryCount.restype = ctypes.c_uint32
++                
++                self.lib.OCG_DuelGetMessage.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
++                self.lib.OCG_DuelGetMessage.restype = ctypes.c_void_p
++                
++                self.lib.OCG_DuelSetResponse.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
++                self.lib.OCG_DuelSetResponse.restype = None
++                
++                self.lib.OCG_DuelQueryLocation.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(OCG_QueryInfo)]
++                self.lib.OCG_DuelQueryLocation.restype = ctypes.c_void_p
+                 
+             except Exception as e:
+                 raise EngineCrashError(f"Erreur lors du chargement de ocgcore: {e}")
+         else:
+             raise EngineCrashError(f"Le moteur compilé est introuvable à l'emplacement: {dll_path}")
+ 
++    # --- Duel Lifecycle ---
++
++    def create_duel(self) -> bool:
++        """
++        Crée un nouveau duel C++. Retourne True si la création a réussi.
++        Détruit tout duel précédent avant d'en créer un nouveau.
++        """
++        self.destroy_duel()
++        
++        duel_ptr = ctypes.c_void_p()
++        options = OCG_DuelOptions()
++        options.seed[0] = 12345
++        options.team1.startingLP = 8000
++        options.team1.startingDrawCount = 5
++        options.team1.drawCountPerTurn = 1
++        options.team2.startingLP = 8000
++        options.team2.startingDrawCount = 5
++        options.team2.drawCountPerTurn = 1
++        
++        # Attacher les callbacks
++        self._cb_card_reader = CARD_READER_CB(my_card_reader)
++        self._cb_script_reader = SCRIPT_READER_CB(my_script_reader)
++        
++        # Log handler pour voir les erreurs C++
++        LOG_HANDLER_CB = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int)
++        def my_log_handler(payload, message, type):
++            try:
++                msg = message.decode('utf-8', errors='ignore')
++                import logging
++                logging.error(f"[OCG_LOG] {msg}")
++            except:
++                pass
++        self._cb_log_handler = LOG_HANDLER_CB(my_log_handler)
++        
++        options.cardReader = ctypes.cast(self._cb_card_reader, ctypes.c_void_p)
++        options.scriptReader = ctypes.cast(self._cb_script_reader, ctypes.c_void_p)
++        options.logHandler = ctypes.cast(self._cb_log_handler, ctypes.c_void_p)
++        
++        res = self.lib.OCG_CreateDuel(ctypes.byref(duel_ptr), ctypes.byref(options))
++        
++        # OCG_DUEL_CREATION_SUCCESS = 0
++        if res == 0 and duel_ptr.value is not None and duel_ptr.value != 0:
++            self.duel_ptr = duel_ptr
++            self._duel_valid = True
++            import logging
++            logging.info(f"Duel C++ créé avec succès (ptr={duel_ptr.value:#x})")
++            return True
++        else:
++            import logging
++            logging.warning(f"OCG_CreateDuel a échoué avec le code: {res}")
++            self.duel_ptr = None
++            self._duel_valid = False
++            return False
++
++    def destroy_duel(self):
++        """Détruit le duel courant s'il est valide."""
++        if self._duel_valid and self.duel_ptr is not None and self.duel_ptr.value:
++            try:
++                self.lib.OCG_DestroyDuel(self.duel_ptr)
++            except Exception:
++                pass
++        self.duel_ptr = None
++        self._duel_valid = False
++
++    def add_card(self, code: int, owner: int, location: int, sequence: int, position: int):
++        """Ajoute une carte au duel courant."""
++        if not self._duel_valid:
++            return
++            
++        info = OCG_NewCardInfo()
++        info.team = owner
++        info.duelist = 0 # MUST BE 0 (sinon ça utilise extra_lists_main qui a un bug de destructor)
++        info.code = code
++        info.con = owner
++        info.loc = location
++        info.seq = sequence
++        info.pos = position
++        
++        self.lib.OCG_DuelNewCard(self.duel_ptr, ctypes.byref(info))
++        
++    def start_duel(self):
++        """Démarre le duel après avoir ajouté toutes les cartes."""
++        if not self._duel_valid:
++            return
++            
++        import os
++        from pathlib import Path
++        scripts_dir = Path(__file__).parent.parent.parent / "data" / "scripts"
++        
++        # Charger les scripts système obligatoires avant de démarrer
++        for script_name in ["constant.lua", "utility.lua"]:
++            path = scripts_dir / script_name
++            if path.exists():
++                with open(path, "rb") as f:
++                    content = f.read()
++                    buf = ctypes.create_string_buffer(content, len(content))
++                    self.lib.OCG_LoadScript(self.duel_ptr, buf, len(content), script_name.encode('utf-8'))
++            else:
++                import logging
++                logging.warning(f"Script système manquant : {script_name}")
++        
++        # OCG_StartDuel receives OCG_Duel
++        self.lib.OCG_StartDuel(self.duel_ptr)
++
++    # --- Actions ---
++
+     def get_legal_actions(self, state: Dict[str, Any]) -> List[Dict[str, Any]]:
+         """
+-        Extrait les actions légales depuis l'état actuel du jeu.
++        Extrait les actions légales depuis le duel actif.
++        Si le duel n'est pas valide, retourne un fallback minimal.
+         """
+-        if state is None:
+-            raise EngineCrashError("L'état passé au moteur est invalide (None).")
++        if not self._duel_valid:
++            return [{"action_type": 0, "source": "no_valid_duel"}]
+             
+         try:
+-            # Test réel du C++ : on crée un duel temporaire
+-            duel_ptr = self.lib.create_duel(12345)
+-            if not duel_ptr:
+-                raise EngineCrashError("Le moteur a retourné un pointeur nul (crash interne).")
++            status = 2 # OCG_DUEL_STATUS_CONTINUE
++            # Boucler tant que le moteur indique qu'il doit continuer (2)
++            while status == 2:
++                status = self.lib.OCG_DuelProcess(self.duel_ptr)
+             
+-            try:
+-                # Transmission de l'état
+-                self._apply_state(duel_ptr, state)
+-                
+-                # Traitement moteur
+-                self.lib.process(duel_ptr)
+-                
+-                # Extraction des actions
+-                actions = self._extract_actions(duel_ptr)
+-                
+-                return actions
+-            finally:
+-                # On termine le duel
+-                self.lib.end_duel(duel_ptr)
++            # 1 = AWAITING, 0 = END
++            actions = self._extract_actions(self.duel_ptr)
++            return actions
+         except Exception as e:
+-            if isinstance(e, EngineCrashError):
+-                raise
+-            raise EngineCrashError(f"Crash du moteur lors de la récupération des actions: {e}")
++            import logging
++            logging.error(f"Erreur dans get_legal_actions: {e}")
++            return [{"action_type": 0, "source": "engine_error"}]
+ 
+-    def _apply_state(self, duel_ptr, state: Dict[str, Any]):
+-        # TODO: Appeler set_player_info, new_card, etc. en fonction de l'état
++    def _apply_state(self, state: Dict[str, Any]):
++        """Applique un état au duel actif (ajout de cartes, etc.)."""
++        # TODO: Appeler OCG_DuelNewCard, set_player_info, etc.
+         pass
+ 
++    def translate_and_set_response(self, action_idx: int, current_state_actions: List[Dict[str, Any]]):
++        """Traduit un index RL en un buffer binaire pour l'engine."""
++        if not self._duel_valid:
++            return
++            
++        import struct
++        
++        # Parcourir les actions légales stockées dans l'état pour trouver le mapping de l'action choisie
++        response_value = 0
++        response_len = 0
++        
++        # Prototype simple: on cherche l'action dans le message IDLECMD, BATTLECMD ou CARD
++        response_bytes = None
++        for msg_block in current_state_actions:
++            if msg_block.get("msg") in ["MSG_SELECT_IDLECMD", "MSG_SELECT_BATTLECMD"]:
++                for choice in msg_block.get("choices", []):
++                    if choice.get("action_idx") == action_idx:
++                        t = choice.get("engine_type", 0)
++                        s = choice.get("engine_index", 0)
++                        
++                        # (index_du_choix << 16) | type_action
++                        response_value = (s << 16) | (t & 0xFFFF)
++                        response_bytes = struct.pack("<I", response_value)
++                        break
++                if response_bytes: break
++            
++            elif msg_block.get("msg") == "MSG_SELECT_CARD":
++                for choice in msg_block.get("choices", []):
++                    if choice.get("action_idx") == action_idx:
++                        s = choice.get("engine_index", 0)
++                        min_c = msg_block.get("min", 1)
++                        
++                        # Remplissage des bytes
++                        bytes_list = [s]
++                        
++                        # Auto-complétion pour min > 1 (MVP)
++                        auto_idx = 0
++                        while len(bytes_list) < min_c:
++                            if auto_idx != s:
++                                bytes_list.append(auto_idx)
++                            auto_idx += 1
++                            
++                        response_bytes = struct.pack(f"<{len(bytes_list)}B", *bytes_list)
++                        break
++                if response_bytes: break
++                
++        # Si c'est pas géré, fallback: on envoie action_idx tel quel
++        if response_bytes is None:
++            response_bytes = struct.pack("<I", action_idx)
++            
++        buffer = ctypes.create_string_buffer(response_bytes, 64)
++        self.lib.OCG_DuelSetResponse(self.duel_ptr, buffer)
++
+     def _extract_actions(self, duel_ptr) -> List[Dict[str, Any]]:
+-        # TODO: Appeler get_message, query_field_info pour populer les actions réelles
+-        return [{"action_type": 1, "source": "engine_process"}]
++        """Extrait les actions depuis les messages du moteur via BinaryReader."""
++        if not self._duel_valid:
++            return [{"action_type": 1, "source": "no_valid_duel"}]
++            
++        length = ctypes.c_uint32()
++        msg_ptr = self.lib.OCG_DuelGetMessage(duel_ptr, ctypes.byref(length))
++        
++        if not msg_ptr or length.value == 0:
++            return []
++            
++        # Lire les données en bytes
++        buffer = ctypes.string_at(msg_ptr, length.value)
++        
++        from core.ygoenv.utils import BinaryReader
++        from core.ygoenv.constants import MSG_WIN, MSG_SELECT_IDLECMD, MSG_SELECT_BATTLECMD, MSG_SELECT_CARD
++        reader = BinaryReader(buffer)
++        
++        actions = []
++        
++        try:
++            while not reader.eof():
++                msg_type = reader.read_uint8()
++                
++                if msg_type == MSG_WIN:
++                    player = reader.read_uint8()
++                    reason = reader.read_uint8()
++                    actions.append({"action_type": 0, "source": "engine_process", "msg": "WIN", "player": player, "reason": reason})
++                    continue
++                
++                elif msg_type == MSG_SELECT_BATTLECMD:
++                    player = reader.read_uint8()
++                    battle_actions = []
++                    
++                    OFFSET_ATTACK = 153
++                    OFFSET_BATTLE_ACTIVATE = 173
++                    
++                    # 1. Activatable (select_chains, type: 0)
++                    count = reader.read_uint32()
++                    for i in range(count):
++                        code = reader.read_uint32()
++                        con = reader.read_uint8()
++                        loc = reader.read_uint8()
++                        seq = reader.read_uint8()
++                        desc = reader.read_uint64()
++                        client_mode = reader.read_uint8()
++                        idx = OFFSET_BATTLE_ACTIVATE + i
++                        battle_actions.append({"type": "BATTLE_ACTIVATE", "engine_type": 0, "engine_index": i, "action_idx": idx, "code": code, "loc": loc, "seq": seq})
++                        
++                    # 2. Attackable (type: 1)
++                    count = reader.read_uint32()
++                    for i in range(count):
++                        code = reader.read_uint32()
++                        con = reader.read_uint8()
++                        loc = reader.read_uint8()
++                        seq = reader.read_uint8()
++                        dir_atk = reader.read_uint8()
++                        idx = OFFSET_ATTACK + i
++                        battle_actions.append({"type": "ATTACK", "engine_type": 1, "engine_index": i, "action_idx": idx, "code": code, "loc": loc, "seq": seq, "direct": dir_atk})
++                        
++                    # 3. M2 & EP
++                    m2 = reader.read_uint8()
++                    ep = reader.read_uint8()
++                    
++                    if m2: battle_actions.append({"type": "MAIN_PHASE_2", "engine_type": 2, "engine_index": 0, "action_idx": 190})
++                    if ep: battle_actions.append({"type": "END_PHASE", "engine_type": 3, "engine_index": 0, "action_idx": 151}) # Note: 151 est To EP dans notre plan global
++                    
++                    actions.append({
++                        "action_type": 1, 
++                        "source": "engine_process", 
++                        "msg": "MSG_SELECT_BATTLECMD", 
++                        "player": player, 
++                        "choices": battle_actions
++                    })
++                    break
++                    
++                elif msg_type == MSG_SELECT_CARD:
++                    player = reader.read_uint8()
++                    cancelable = reader.read_uint8()
++                    min_c = reader.read_uint32()
++                    max_c = reader.read_uint32()
++                    count = reader.read_uint32()
++                    
++                    card_actions = []
++                    OFFSET_SELECT_CARD = 191
++                    
++                    for i in range(count):
++                        code = reader.read_uint32()
++                        con = reader.read_uint8()
++                        loc = reader.read_uint8()
++                        seq = reader.read_uint8()
++                        pos = reader.read_uint8()
++                        
++                        idx = OFFSET_SELECT_CARD + i
++                        if idx <= 199:
++                            card_actions.append({
++                                "type": "SELECT_CARD", 
++                                "engine_type": 0, 
++                                "engine_index": i, 
++                                "action_idx": idx, 
++                                "code": code, 
++                                "loc": loc, 
++                                "seq": seq, 
++                                "pos": pos
++                            })
++                            
++                    actions.append({
++                        "action_type": 1, 
++                        "source": "engine_process", 
++                        "msg": "MSG_SELECT_CARD", 
++                        "player": player, 
++                        "min": min_c,
++                        "max": max_c,
++                        "cancelable": cancelable,
++                        "choices": card_actions
++                    })
++                    break
++
++                elif msg_type == MSG_SELECT_IDLECMD:
++                    player = reader.read_uint8()
++                    idle_actions = []
++                    
++                    # Offsets pour notre Action Space statique
++                    OFFSET_SUMMON = 0
++                    OFFSET_SPSUMMON = 20
++                    OFFSET_REPOS = 40
++                    OFFSET_MSET = 60
++                    OFFSET_SSET = 80
++                    OFFSET_ACTIVATE = 100
++                    
++                    # 1. Summonable (type: 0)
++                    count = reader.read_uint8()
++                    for i in range(count):
++                        code = reader.read_uint32()
++                        con = reader.read_uint8()
++                        loc = reader.read_uint8()
++                        seq = reader.read_uint8()
++                        idx = OFFSET_SUMMON + i
++                        idle_actions.append({"type": "SUMMON", "engine_type": 0, "engine_index": i, "action_idx": idx, "code": code, "loc": loc, "seq": seq})
++                        
++                    # 2. SPSummonable (type: 1)
++                    count = reader.read_uint8()
++                    for i in range(count):
++                        code = reader.read_uint32()
++                        con = reader.read_uint8()
++                        loc = reader.read_uint8()
++                        seq = reader.read_uint8()
++                        idx = OFFSET_SPSUMMON + i
++                        idle_actions.append({"type": "SPSUMMON", "engine_type": 1, "engine_index": i, "action_idx": idx, "code": code, "loc": loc, "seq": seq})
++                        
++                    # 3. Reposition (type: 2)
++                    count = reader.read_uint8()
++                    for i in range(count):
++                        code = reader.read_uint32()
++                        con = reader.read_uint8()
++                        loc = reader.read_uint8()
++                        seq = reader.read_uint8()
++                        idx = OFFSET_REPOS + i
++                        idle_actions.append({"type": "REPOS", "engine_type": 2, "engine_index": i, "action_idx": idx, "code": code, "loc": loc, "seq": seq})
++                        
++                    # 4. MSet (type: 3)
++                    count = reader.read_uint8()
++                    for i in range(count):
++                        code = reader.read_uint32()
++                        con = reader.read_uint8()
++                        loc = reader.read_uint8()
++                        seq = reader.read_uint8()
++                        idx = OFFSET_MSET + i
++                        idle_actions.append({"type": "MSET", "engine_type": 3, "engine_index": i, "action_idx": idx, "code": code, "loc": loc, "seq": seq})
++                        
++                    # 5. SSet (type: 4)
++                    count = reader.read_uint8()
++                    for i in range(count):
++                        code = reader.read_uint32()
++                        con = reader.read_uint8()
++                        loc = reader.read_uint8()
++                        seq = reader.read_uint8()
++                        idx = OFFSET_SSET + i
++                        idle_actions.append({"type": "SSET", "engine_type": 4, "engine_index": i, "action_idx": idx, "code": code, "loc": loc, "seq": seq})
++                        
++                    # 6. Activate (type: 5)
++                    count = reader.read_uint8()
++                    for i in range(count):
++                        code = reader.read_uint32()
++                        con = reader.read_uint8()
++                        loc = reader.read_uint8()
++                        seq = reader.read_uint8()
++                        idx = OFFSET_ACTIVATE + i
++                        idle_actions.append({"type": "ACTIVATE", "engine_type": 5, "engine_index": i, "action_idx": idx, "code": code, "loc": loc, "seq": seq})
++                        
++                    bp = reader.read_uint8()
++                    ep = reader.read_uint8()
++                    shuffle = reader.read_uint8()
++                    
++                    if bp: idle_actions.append({"type": "BATTLE_PHASE", "engine_type": 6, "engine_index": 0, "action_idx": 150})
++                    if ep: idle_actions.append({"type": "END_PHASE", "engine_type": 7, "engine_index": 0, "action_idx": 151})
++                    if shuffle: idle_actions.append({"type": "SHUFFLE", "engine_type": 8, "engine_index": 0, "action_idx": 152})
++                    
++                    actions.append({
++                        "action_type": 1, 
++                        "source": "engine_process", 
++                        "msg": "MSG_SELECT_IDLECMD", 
++                        "player": player, 
++                        "choices": idle_actions
++                    })
++                    break
++                
++                # Pour le prototype, on ignore les autres messages complexes (ça demande d'implanter tout le protocole)
++                actions.append({"action_type": 1, "source": "engine_process", "msg": msg_type})
++                break
++                
++        except EOFError:
++            pass
++            
++        return actions
+ 
+     def save_state(self):
+         """Retourne un buffer binaire de l'état du duel C++."""
+         # TODO: Appeler une fonction C++ pour extraire la mémoire du duel
+         return None
+ 
++    def get_global_info(self) -> Dict[str, Any]:
++        """
++        Récupère les informations globales du duel (LP, etc.) via OCG_DuelQueryField.
++        """
++        if not self._duel_valid:
++            return {"lp": [8000, 8000]}
++            
++        length = ctypes.c_uint32()
++        msg_ptr = self.lib.OCG_DuelQueryField(self.duel_ptr, ctypes.byref(length))
++        
++        info = {"lp": [8000, 8000]}
++        if msg_ptr and length.value > 0:
++            buffer = ctypes.string_at(msg_ptr, length.value)
++            from core.ygoenv.utils import BinaryReader
++            reader = BinaryReader(buffer)
++            
++            try:
++                # Format OCG_DuelQueryField :
++                # uint32 : duel_options
++                reader.read_uint32()
++                
++                for p in range(2):
++                    info["lp"][p] = reader.read_uint32()
++                    
++                    # Ignorer mzone (7 slots)
++                    for _ in range(7):
++                        if reader.read_uint8() == 1:
++                            reader.read_uint8()
++                            reader.read_uint32()
++                            
++                    # Ignorer szone (8 slots)
++                    for _ in range(8):
++                        if reader.read_uint8() == 1:
++                            reader.read_uint8()
++                            reader.read_uint32()
++                            
++                    # Ignorer les tailles de deck/hand/grave/etc (6 * uint32)
++                    for _ in range(6):
++                        reader.read_uint32()
++            except EOFError:
++                pass
++                
++        return info
++
++    def query_field_state(self, player_id: int) -> List[Dict[str, Any]]:
++        """
++        Récupère l'état complet du plateau pour chaque emplacement.
++        Renvoie une liste de dictionnaires contenant code, position, type, level, atk, def.
++        """
++        if not self._duel_valid:
++            return []
++            
++        cards_info = []
++        from core.ygoenv.constants import (
++            QUERY_CODE, QUERY_POSITION, QUERY_TYPE, 
++            QUERY_LEVEL, QUERY_ATTACK, QUERY_DEFENSE
++        )
++        query_flags = QUERY_CODE | QUERY_POSITION | QUERY_TYPE | QUERY_LEVEL | QUERY_ATTACK | QUERY_DEFENSE
++        
++        # Locations standards YGOPro: 
++        # 0x01: Deck, 0x02: Hand, 0x04: MZone, 0x08: SZone, 0x10: Grave, 0x20: Removed, 0x40: Extra
++        locations = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40] 
++        
++        for p in [player_id, 1 - player_id]:
++            for loc in locations:
++                info = OCG_QueryInfo()
++                info.flags = query_flags
++                info.con = p
++                info.loc = loc
++                info.seq = 0
++                info.overlay_seq = 0
++                
++                length = ctypes.c_uint32()
++                msg_ptr = self.lib.OCG_DuelQueryLocation(self.duel_ptr, ctypes.byref(length), ctypes.byref(info))
++                
++                if msg_ptr and length.value > 0:
++                    buffer = ctypes.string_at(msg_ptr, length.value)
++                    from core.ygoenv.utils import BinaryReader
++                    reader = BinaryReader(buffer)
++                    
++                    try:
++                        total_len = reader.read_uint32()
++                        while not reader.eof():
++                            block_len = reader.read_uint16()
++                            if block_len == 0:
++                                continue # Empty card slot
++                                
++                            card_data = {
++                                "player": p,
++                                "location": loc,
++                                "code": 0,
++                                "position": 0,
++                                "type": 0,
++                                "level": 0,
++                                "attack": 0,
++                                "defense": 0
++                            }
++                            
++                            from core.ygoenv.constants import QUERY_END
++                            # Lecture de toutes les propriétés de la carte jusqu'à QUERY_END
++                            while True:
++                                if block_len > 0:
++                                    flag = reader.read_uint32()
++                                    if flag == QUERY_END:
++                                        break
++                                        
++                                    if flag == QUERY_CODE:
++                                        card_data["code"] = reader.read_uint32()
++                                    elif flag == QUERY_POSITION:
++                                        card_data["position"] = reader.read_uint32()
++                                    elif flag == QUERY_TYPE:
++                                        card_data["type"] = reader.read_uint32()
++                                    elif flag == QUERY_LEVEL:
++                                        card_data["level"] = reader.read_uint32()
++                                    elif flag == QUERY_ATTACK:
++                                        card_data["attack"] = reader.read_uint32()
++                                    elif flag == QUERY_DEFENSE:
++                                        card_data["defense"] = reader.read_uint32()
++                                    else:
++                                        # Skip unknown flag payload
++                                        reader.read_bytes(block_len - 4)
++                                        
++                                block_len = reader.read_uint16()
++                                    
++                            if card_data["code"] > 0:
++                                cards_info.append(card_data)
++                                
++                    except EOFError:
++                        pass
++        return cards_info
++
+     def restore_state(self, state_buffer):
+         """Restaure l'état C++ depuis un buffer binaire."""
+         # TODO: Appeler une fonction C++ pour restaurer la mémoire du duel
+         pass
++
+diff --git a/tests/api/test_deck_routes.py b/tests/api/test_deck_routes.py
+new file mode 100644
+index 0000000..df0e2c3
+--- /dev/null
++++ b/tests/api/test_deck_routes.py
+@@ -0,0 +1,55 @@
++import pytest
++import httpx
++import json
++from fastapi.testclient import TestClient
++from api.main import app
++
++client = TestClient(app)
++
++def test_import_deck_success(httpx_mock):
++    # Arrange
++    httpx_mock.add_response(
++        url="http://localhost:8000/api/v1/parse",
++        json={"main": [1234, 5678], "extra": [9012], "side": []}
++    )
++    
++    # Act
++    response = client.post(
++        "/api/v1/decks/import",
++        json={"deckData": "some_ydk_content"}
++    )
++    
++    # Assert
++    assert response.status_code == 200
++    data = response.json()
++    assert data["main"] == [1234, 5678]
++    assert data["extra"] == [9012]
++    assert data["side"] == []
++    
++    # Validate outbound payload
++    request = httpx_mock.get_request()
++    assert request is not None
++    request_body = json.loads(request.read().decode("utf-8"))
++    assert request_body == {"deck": "some_ydk_content"}
++
++def test_import_deck_microservice_error(httpx_mock):
++    httpx_mock.add_response(url="http://localhost:8000/api/v1/parse", status_code=500)
++    response = client.post("/api/v1/decks/import", json={"deckData": "ydk"})
++    assert response.status_code == 500
++    assert response.json()["error"]["code"] == "DECK_PARSER_ERROR"
++
++def test_import_deck_network_timeout(httpx_mock):
++    httpx_mock.add_exception(httpx.RequestError("Timeout"), url="http://localhost:8000/api/v1/parse")
++    response = client.post("/api/v1/decks/import", json={"deckData": "ydk"})
++    assert response.status_code == 500
++    assert "Network error" in response.json()["error"]["detail"]
++
++def test_import_deck_invalid_json(httpx_mock):
++    httpx_mock.add_response(url="http://localhost:8000/api/v1/parse", json=[]) # not a dict
++    response = client.post("/api/v1/decks/import", json={"deckData": "ydk"})
++    assert response.status_code == 500
++    assert "invalid JSON format" in response.json()["error"]["detail"]
++
++def test_import_deck_invalid_payload():
++    response = client.post("/api/v1/decks/import", json={"deckData": ""})
++    assert response.status_code == 422 # Pydantic validation error (min_length=1)

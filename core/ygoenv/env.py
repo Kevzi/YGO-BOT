@@ -51,9 +51,9 @@ class YgoEnv(gym.Env):
         """Injecte le deck de l'agent dans l'environnement."""
         self.agent_deck = deck
         
-    def _get_observation(self, mock_card_ids: np.ndarray = None) -> np.ndarray:
+    def _get_observation(self, mock_card_ids: np.ndarray = None, player: int = 0) -> np.ndarray:
         # Appeler l'engine pour extraire les informations riches des cartes
-        cards_info = self.engine.query_field_state(0) # on interroge l'état pour le joueur 0
+        cards_info = self.engine.query_field_state(player) # on interroge l'état pour le joueur
         global_info = self.engine.get_global_info() if hasattr(self.engine, 'get_global_info') else {"lp": [8000, 8000]}
         
         # Brouillard de Guerre et Filtres
@@ -232,12 +232,13 @@ class YgoEnv(gym.Env):
         
         # On doit d'abord appeler get_legal_actions pour avancer le moteur (tirage des mains, etc.)
         legal_actions = self.get_legal_actions()
-        obs = self._get_observation()
         
         current_player = 0
         if self._current_state_actions and len(self._current_state_actions) > 0:
             current_player = self._current_state_actions[0].get("player", 0)
             
+        obs = self._get_observation(player=current_player)
+        
         return obs, {"legal_actions": legal_actions, "current_player": current_player}
         
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict]:
@@ -260,7 +261,7 @@ class YgoEnv(gym.Env):
         legal_actions_mask = self.get_legal_actions()
         
         # Parser les messages pour chercher MSG_WIN (5) ou autres events importants
-        for a in self._current_state_actions:
+        for a in (self._current_state_actions or []):
             if a.get("msg") == "WIN":
                 terminated = True
                 # player 0 = nous, player 1 = adversaire, player 2 = draw
@@ -278,13 +279,13 @@ class YgoEnv(gym.Env):
         if self.step_count >= self.max_turns:
             truncated = True
             
-        obs = self._get_observation()
-        
         # Déterminer le joueur courant
         current_player = 0
         if self._current_state_actions and len(self._current_state_actions) > 0:
             current_player = self._current_state_actions[0].get("player", 0)
             
+        obs = self._get_observation(player=current_player)
+        
         info = {
             "legal_actions": legal_actions_mask,
             "current_player": current_player

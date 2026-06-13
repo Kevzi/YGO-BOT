@@ -28,7 +28,8 @@ MANIFEST
 
 # Environment
 .env
-.venv
+.venv/
+.venv_wsl/
 env/
 venv/
 ENV/
@@ -62,3 +63,6 @@ Thumbs.db
 # VS Code / IDE
 .vscode/
 .idea/
+
+# Data scripts
+data/scripts/

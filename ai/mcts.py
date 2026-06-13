@@ -55,7 +55,7 @@ class MCTS:
         action_mask_jnp = jnp.expand_dims(jnp.array(action_mask, dtype=jnp.bool_), 0)
         
         new_carry, logits, value = self.actor_critic.apply(
-            self.params, carry, obs_jnp, prev_action_jnp, action_mask_jnp
+            {'params': self.params}, carry, obs_jnp, prev_action_jnp, action_mask_jnp
         )
         
         value = float(value[0, 0])
