@@ -20,7 +20,7 @@ class YgoEnv(gym.Env):
         
         self.engine = YgoEngine()
         self._current_state = None
-        self.max_turns = 100
+        self.max_turns = 1000
         self.action_history = []
         self.step_count = 0
         
@@ -41,11 +41,9 @@ class YgoEnv(gym.Env):
 
     def get_action_mask(self):
         """
-        Retourne un masque booléen (ou de 0/1) indiquant quelles actions sont légales.
-        Pour l'instant, c'est un mock où toutes les actions sont légales.
+        Retourne un masque booléen indiquant quelles actions sont légales.
         """
-        import numpy as np
-        return np.ones(self.action_space.n, dtype=np.bool_)
+        return self.get_legal_actions()
 
     def set_deck(self, deck: dict):
         """Injecte le deck de l'agent dans l'environnement."""
@@ -191,6 +189,7 @@ class YgoEnv(gym.Env):
         super().reset(seed=seed, options=options)
         
         self.action_history = []
+        self.step_count = 0
         
         # Détruire le duel précédent s'il existe
         self.engine.destroy_duel()
@@ -214,8 +213,8 @@ class YgoEnv(gym.Env):
                     codes = [c.id for c in cards]
                     
                     if len(codes) > 0:
-                        # Remplir le Deck avec ce qu'on a trouvé (alterné pour faire 40 cartes)
-                        deck = (codes * 20)[:40]
+                        # Remplir le Deck avec ce qu'on a trouvé (mini deck de 10 cartes pour forcer la fin de partie)
+                        deck = (codes * 20)[:10]
                         
                         for player in (0, 1):
                             for seq, code in enumerate(deck):

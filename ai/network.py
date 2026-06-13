@@ -41,7 +41,7 @@ class ActorCriticLSTM(nn.Module):
         value = nn.Dense(1, name="critic")(h_out)
         logits = nn.Dense(self.act_dim, name="actor")(h_out)
         
-        logits = jnp.where(action_mask, logits, jnp.finfo(jnp.float32).min)
+        logits = jnp.where(action_mask, logits, -1e9)
         
         return new_carry, logits, value
 

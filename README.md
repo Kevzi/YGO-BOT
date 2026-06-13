@@ -1,133 +1,122 @@
-<div align="center">
-  <h1>🐉 YGO-BOT</h1>
-  <p><b>Massive-Scale Distributed Deep Reinforcement Learning for Yu-Gi-Oh!</b></p>
-  <p><i>Powered by JAX, Flax, Ray, and Gumbel AlphaZero</i></p>
-</div>
+# YGO-Agent 🃏🤖
 
-<br/>
+![Yu-Gi-Oh! AI](https://img.shields.io/badge/Yu--Gi--Oh!-AI-blue?style=for-the-badge&logo=ai)
+![JAX](https://img.shields.io/badge/JAX-Powered-orange?style=for-the-badge)
+![Ray](https://img.shields.io/badge/Ray-Distributed-blue?style=for-the-badge)
 
-YGO-BOT is an open-source research project aimed at creating a super-human AI for the Yu-Gi-Oh! Trading Card Game. By combining **Proximal Policy Optimization (PPO)**, **Gumbel AlphaZero MCTS**, and a fully distributed asynchronous **Ray** architecture, this agent is designed to scale on massive cloud computing infrastructures (like Google TPUs) to tackle one of the most complex board/card games in existence.
+**YGO-Agent** is an advanced open-source Reinforcement Learning (RL) agent trained to play the complex Trading Card Game *Yu-Gi-Oh!*. By wrapping the original C++ rules engine (`ocgcore`) into a high-performance Python environment, this project pushes the boundaries of discrete action space RL and sequential decision-making under imperfect information.
 
----
-
-## 🧠 The Challenge: Why Yu-Gi-Oh! ?
-
-Yu-Gi-Oh! presents unique challenges for Artificial Intelligence, far exceeding the combinatorial complexity of Chess or Go:
-
-| Challenge | Description |
-| :--- | :--- |
-| **Massive State Space** | Over 10,000 unique cards with complex, chaining effects. Our environment observation vector has **60,694 dimensions**. |
-| **Imperfect Information** | Hands and face-down cards are completely hidden from the opponent, requiring probability estimation and memory. |
-| **Dynamic Action Space** | Up to 200 contextual actions (Summon, Activate, Chain, Attack) that dynamically change at every micro-step. |
+This project is built from the ground up for massive distributed training using **Ray** and hardware acceleration via **JAX**, allowing seamless scaling across GPU/TPU clusters.
 
 ---
 
-## 🏗️ Technical Architecture
+## 🌟 Vision & Breakthroughs
 
-### 1. Distributed Asynchronous Self-Play (Ray)
-To overcome the massive computational requirement of C++ environment simulations, we implemented a decoupled Actor-Learner architecture using **Ray**.
+Training an AI to play Yu-Gi-Oh! presents unique challenges compared to Chess or Go:
+- **Massive State Space**: Over 10,000 unique cards with complex inter-card synergies.
+- **Dynamic Action Space**: An action space of over 200 possible moves, dynamically masked per step.
+- **Hidden Information**: Opponent's hand and face-down cards are completely hidden.
+- **Lengthy Trajectories**: A single duel can last up to 100+ interactions.
+
+### The Architecture
+To solve this, we use a hybrid **PPO + LSTM** architecture capable of keeping track of "belief states" about hidden information, paired with aggressive **Action Masking** to immediately zero-out probabilities of illegal moves (using a penalty of `-1e9` inside the network).
 
 ```mermaid
 graph TD
-    PS((SelfPlayManager<br/>Parameter Server))
-    
-    subgraph "CPU Cluster (Massive Parallelism)"
-        W1[Rollout Worker 1<br/>libocgcore C++]
-        W2[Rollout Worker 2<br/>libocgcore C++]
-        W3[Rollout Worker N<br/>libocgcore C++]
+    subgraph Env [Environment - ocgcore C++]
+        E[YgoEngine] -->|Observation & Legal Actions| W[YgoEnv Python Wrapper]
+        W -->|Step| E
+    end
+
+    subgraph Agent [Neural Network - JAX/Flax]
+        O[Observation 60,694 dims] --> L1[Dense Layers]
+        L1 --> LSTM[LSTM Cell]
+        LSTM --> A[Actor Head]
+        LSTM --> C[Critic Head]
+        
+        M[Action Mask] -.->|Filters| A
+        A -->|Softmax| P[Action Probabilities]
+    end
+
+    subgraph Cluster [Distributed Training - Ray]
+        RW1[Rollout Worker 1 CPU] -->|Trajectories| Q[Experience Queue]
+        RW2[Rollout Worker 2 CPU] -->|Trajectories| Q
+        RWn[Rollout Worker N CPU] -->|Trajectories| Q
+        
+        Q -->|Batch| L[Learner GPU/TPU]
+        L -->|PPO Update| L
+        L -->|Sync Params| PS[Parameter Server]
+        PS -.->|Pull Weights| RW1
+        PS -.->|Pull Weights| RW2
     end
     
-    subgraph "Hardware Accelerator (TPU/GPU)"
-        L[Learner Node<br/>JAX/Flax XLA Compilation]
-    end
-    
-    PS -. "Pull Latest/Historical Weights<br/>(League Training)" .-> W1
-    PS -. "Pull Weights" .-> W2
-    PS -. "Pull Weights" .-> W3
-    
-    W1 -- "Batch Rollouts<br/>(State, Action, Reward)" --> L
-    W2 -- "Batch Rollouts" --> L
-    W3 -- "Batch Rollouts" --> L
-    
-    L -- "Push Updated Weights" --> PS
+    W -->|State| O
+    W -->|Mask| M
+    P -->|Selected Action| W
 ```
-
-- **Rollout Workers (CPU)**: Hundreds of lightweight actors run the C++ Yu-Gi-Oh! engine (`libocgcore`) to simulate games in parallel. They are restricted from GPU access to avoid VRAM bottlenecks.
-- **Learner (GPU/TPU)**: A centralized actor that receives batches of rollouts and performs rapid Backpropagation using JAX's `jit` compilation.
-- **Parameter Server**: Maintains a history of network weights to train the agent against previous versions of itself (League Training), ensuring robust monotonic improvement.
-
-### 2. Neural Network (JAX/Flax)
-The core of the agent is a highly optimized `ActorCriticLSTM` network written purely in **Flax/JAX**.
-
-```mermaid
-graph LR
-    Obs["Observation Vector<br/>(60,694 dims)"] --> Emb["Card Embedding Layer<br/>Dense Projection"]
-    Emb --> LSTM["LSTM Core<br/>(Hidden Memory State)"]
-    
-    LSTM --> Policy["Policy Head<br/>(Logits)"]
-    LSTM --> Value["Value Head<br/>(Critic)"]
-    
-    Mask["Action Mask<br/>(Valid Moves)"] --> MaskedSoftmax
-    Policy --> MaskedSoftmax["Masked Softmax<br/>(Zeroes illegal moves)"]
-    
-    MaskedSoftmax --> Action["Action Probabilities"]
-    Value --> ValOut["State Value (-1 to 1)"]
-```
-- **Action Masking**: A critical mechanism that zeroes out illegal actions dynamically at the logits level, preventing the network from wasting gradient updates on invalid moves.
-
-### 3. Gumbel AlphaZero & PPO
-We completely bypass manual *Reward Shaping* (which leads to Reward Hacking) and rely purely on the sparse end-game reward (+1 Win, -1 Loss).
-
-```mermaid
-sequenceDiagram
-    participant Net as JAX Neural Net
-    participant Gumbel as Gumbel Noise
-    participant MCTS as MCTS Tree
-    participant Env as Yu-Gi-Oh! Env
-
-    Net->>Gumbel: Raw Action Logits
-    Gumbel->>MCTS: Root Evaluation + Noise
-    loop 4-8 Simulations
-        MCTS->>Env: Clone State & Play Move
-        Env-->>MCTS: New State & Reward
-    end
-    MCTS-->>Net: Improved Action Distribution
-```
-
-- **MCTS with Gumbel Noise**: By injecting **Gumbel noise** at the root (Gumbel AlphaZero variant), the agent achieves stable exploration without needing the hundreds of simulations required by traditional Dirichlet noise.
-- **Curriculum Learning**: The architecture supports toggling MCTS off for a "Cold Start" rapid pure-PPO training, then activating MCTS for deep tactical fine-tuning.
-- **Generalized Advantage Estimation (GAE)**: Stabilizes policy updates over extremely long episodes.
 
 ---
 
-## 🚀 Why We Need Google TRC (TPU Research Cloud)
+## 🚀 Features
 
-While the architecture is mathematically sound and highly optimized locally, mastering Yu-Gi-Oh! requires an enormous amount of self-play to converge.
-- A single Rollout Worker needs to clone the C++ environment state hundreds of times per game to build the MCTS tree.
-- On a high-end local machine (RTX 3000 series + 8-core CPU), generating a single batch of rollouts takes several minutes.
-- To reach professional human level, the agent must play **millions of games**.
-
-**Google TPUs** (via JAX's native XLA compilation) combined with a massive CPU cluster for Ray workers is the only way to scale this project from an architectural MVP to a superhuman agent. The code is inherently **TPU-ready** through JAX.
+- **Blazing Fast C++ Engine**: Powered by the official `ocgcore` to perfectly emulate the card game logic without hallucinations.
+- **Action Masking**: Hard-coded `-1e9` penalty to illegal logits natively in the JAX computation graph to prevent the agent from wasting exploration on invalid states.
+- **Distributed League Training**: Built on **Ray**, separating Rollout Workers (CPU-bound inference) from the Learner (GPU/TPU-bound backward passes).
+- **Asynchronous Parameter Server**: Hot-swaps model weights in real-time without pausing the simulation workers.
+- **Zero-Shot Semantic Embeddings**: (Roadmap) Injecting LLM-based vector embeddings to allow the agent to understand *new* cards it has never seen in training just by reading their descriptions.
 
 ---
 
-## 🛠️ Setup & Local Training
+## 🛠️ Installation
 
-### Requirements
-- Python 3.12+
-- WSL2 (for Windows users, required for the C++ engine)
-- JAX & Flax
-- Ray Cluster
+```bash
+# 1. Clone the repository
+git clone https://github.com/Kevzi/YGO-BOT.git
+cd YGO-BOT
 
-### Running the Distributed Training
-To launch the cluster locally and begin the PPO Self-Play loop:
+# 2. Install dependencies (Requires Python 3.10+)
+pip install -r requirements.txt
+
+# 3. Ensure ocgcore.dll (or .so) is built
+# Check the /core/ygoenv/ folder for instructions on compiling the C++ engine.
+```
+
+---
+
+## 🧠 Training the Agent
+
+Start the distributed training cluster natively:
+
 ```bash
 python scripts/train_distributed.py
 ```
-*(Tip: Set `PYTHONUNBUFFERED=1` to see real-time Ray logs)*
+
+The system will:
+1. Boot a local Ray cluster.
+2. Initialize the Parameter Server and Experience Queue.
+3. Launch `N` Rollout Workers (depending on your CPU core count).
+4. Launch the GPU Learner.
+5. Save model checkpoints in the `checkpoints/` directory.
 
 ---
 
-<p align="center">
-  <i>This project is built upon libocgcore and draws inspiration from DeepMind's AlphaZero and deep reinforcement learning breakthroughs.</i>
-</p>
+## 📊 Project Roadmap (BMAD Methodology)
+
+Our roadmap strictly follows a business-driven BDD and Agile structure:
+- [x] **Epic 1**: Integration of the C++ Engine and API architecture.
+- [x] **Epic 2**: Basic RL Environment and Neural Network setup.
+- [x] **Epic 5**: Discretized Action Space & Action Masking (Successfully implemented!).
+- [ ] **Epic 3 & 6**: MCTS (Monte Carlo Tree Search), Memory, and League Training.
+
+---
+
+## 🤝 Grant Application & Google TRC
+
+This architecture is heavily optimized for TPUs. By decoupling the experience gathering onto CPU workers and batching PPO updates exclusively on the Learner node, this code is primed for the **Google TPU Research Cloud (TRC)**.
+The bottleneck of Deep RL in complex games is often the environment interaction. Here, the `YgoEnv` can run thousands of parallel instances on high-core CPUs, feeding a singular robust JAX Learner on a TPU v4.
+
+*We are currently seeking support and compute grants to scale this model to the full 10,000+ card pool of Yu-Gi-Oh!*
+
+---
+
+**Made with passion by AI Researchers and Duelists.**

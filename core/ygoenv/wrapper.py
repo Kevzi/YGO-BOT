@@ -265,10 +265,10 @@ class YgoEngine:
         duel_ptr = ctypes.c_void_p()
         options = OCG_DuelOptions()
         options.seed[0] = 12345
-        options.team1.startingLP = 8000
+        options.team1.startingLP = 1000
         options.team1.startingDrawCount = 5
         options.team1.drawCountPerTurn = 1
-        options.team2.startingLP = 8000
+        options.team2.startingLP = 1000
         options.team2.startingDrawCount = 5
         options.team2.drawCountPerTurn = 1
         

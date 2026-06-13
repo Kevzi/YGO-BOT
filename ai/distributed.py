@@ -72,13 +72,13 @@ class Learner:
                 all_lp.append(r["log_probs"])
                 all_dones.append(r["dones"])
                 
-            obs_batch = np.stack(all_states)
-            mask_batch = np.stack(all_masks).astype(bool)
-            act_batch = np.stack(all_actions)
-            adv_batch = np.stack(all_adv)
-            ret_batch = np.stack(all_ret)
-            lp_batch = np.stack(all_lp)
-            dones_batch = np.stack(all_dones)
+            obs_batch = np.concatenate(all_states, axis=0)
+            mask_batch = np.concatenate(all_masks, axis=0).astype(bool)
+            act_batch = np.concatenate(all_actions, axis=0)
+            adv_batch = np.concatenate(all_adv, axis=0)
+            ret_batch = np.concatenate(all_ret, axis=0)
+            lp_batch = np.concatenate(all_lp, axis=0)
+            dones_batch = np.concatenate(all_dones, axis=0)
             
             # Mettre à jour le réseau PPO
             self.params, self.opt_state, metrics = self.agent.update_params(
@@ -105,6 +105,10 @@ class RolloutWorker:
     les trajectoires générées dans la Queue.
     """
     def __init__(self, parameter_server_handle, queue_handle, obs_dim, act_dim, worker_id):
+        import os
+        os.environ["JAX_PLATFORMS"] = "cpu"
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+        
         self.parameter_server = parameter_server_handle
         self.queue = queue_handle
         self.worker_id = worker_id
@@ -169,17 +173,7 @@ class RolloutWorker:
                 hidden_state_opponent = next_hidden
             
             probs = np.asarray(probs).flatten()
-            mask_np = np.asarray(mask).flatten()
-            masked_probs = probs * mask_np
-            prob_sum = np.sum(masked_probs)
-            if prob_sum == 0:
-                mask_sum = np.sum(mask_np)
-                if mask_sum > 0:
-                    masked_probs = mask_np / mask_sum
-                else:
-                    masked_probs = np.ones(len(mask_np)) / len(mask_np)
-            else:
-                masked_probs = masked_probs / prob_sum
+            masked_probs = probs
                 
             # --- BYPASS MCTS POUR LE COLD START (MVP) ---
             use_mcts = False  # Activé plus tard quand le modèle de base sera pré-entraîné
@@ -203,6 +197,8 @@ class RolloutWorker:
             next_obs, reward, terminated, truncated, info = self.env.step(action)
             done = terminated or truncated
             
+            if done:
+                print(f"--- Partie terminée ! Récompense finale : {reward} | Truncated : {truncated} | Longueur (cette boucle) : {total_env_steps} ---")
             if current_player == 0:
                 states.append(obs)
                 masks.append(mask)
