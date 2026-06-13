@@ -23,41 +23,66 @@ Pour résoudre un tel problème, ce projet déploie une stack technologique de p
 - **Le Cerveau (Deep RL sous JAX)** : Utilisation de **JAX** pour la compilation Just-In-Time (XLA) et la vectorisation massive sur accélérateurs matériels. Le modèle repose sur l'algorithme **PPO (Proximal Policy Optimization)** combiné à des couches **LSTM** pour modéliser la mémoire temporelle de l'agent et gérer l'état de croyance (*Belief State*) face aux informations cachées.
 - **La Planification (Gumbel AlphaZero & IS-MCTS)** : Implémentation avancée de la recherche arborescente de Monte-Carlo pour l'anticipation temporelle des coups et la modélisation sous brouillard de guerre.
 - **L'Orchestration Distribuée (Ray)** : Ce projet est nativement configuré avec le **Ray Cluster Launcher** pour être déployé à très grande échelle sur des clusters Cloud, notamment le **Google TPU Research Cloud (TRC)**.
-- **L'Action Masking & Le Moteur C++** : Pour éviter le tâtonnement aveugle (End-to-End), l'IA s'appuie sur la bibliothèque C++ hautement optimisée `ocgcore`. À chaque milliseconde, le moteur valide les états et retourne un masque d'actions binaires strict qui bloque mathématiquement toute action illégale (pénalité `-1e9` avant le Softmax).
+### Le Produit : Diagramme de l'Inférence
+
+Ce flux montre l'interaction temps réel lors d'une partie. Le réseau JAX ne calcule jamais sur un état invalide, grâce au pont C++ de masquage.
 
 ```mermaid
 graph TD
-    %% Moteur et Environnement
-    subgraph Environnement ["Environnement (CPU) - ocgcore"]
+    %% Moteur et Inférence
+    Client["Clients Lourds/Web<br>(YGO Omega / Neos)"]
+    API["Serveur FastAPI<br>(Python)"]
+    
+    subgraph Core ["Environnement et Moteur de Règles"]
+        YGO["Wrapper (ygoenv)"]
         CPP["Moteur C++ (ocgcore)"]
-        YGO["Wrapper Python (YgoEnv)"]
-        CPP -->|"Etats du Jeu & Actions Légales"| YGO
-        YGO -->|"Observations Vectorisées (156 slots)"| CPP
+        YGO -- "Demande d'État" --> CPP
+        CPP -- "État & Masque d'Actions Légales" --> YGO
     end
 
-    %% Réseau de Neurones
-    subgraph Modele ["Modèle PPO (JAX/Flax)"]
-        OBS["Observation (60,694 dims)"]
-        LSTM["Cellule LSTM (Belief State)"]
-        MASK["Action Masking (-1e9)"]
+    subgraph Cerveau ["Cerveau IA (JAX)"]
+        LLM["Embeddings LLM<br>(embed.pkl)"]
+        JAX["Réseau PPO/LSTM"]
+        LLM -. "Vecteurs Lexicaux" .-> JAX
+    end
+
+    Client <-->|"JSON over HTTP/WS"| API
+    API --> YGO
+    YGO -->|"Observations Vectorisées + Masque"| Cerveau
+    Cerveau -->|"Action Choisie (Softmax + Masque -1e9)"| YGO
+```
+
+### La Recherche : Diagramme de l'Entraînement Distribué
+
+Pour s'entraîner sur des millions de parties, le système déploie un apprentissage par renforcement massivement distribué.
+
+```mermaid
+graph TD
+    %% Entraînement Distribué
+    subgraph RayCluster ["Ray Cluster (Google TRC Ready)"]
         
-        OBS --> LSTM
-        LSTM -->|"Logits (Actor)"| MASK
-        MASK -->|"Softmax"| PROBS["Probabilités d'Actions"]
-        LSTM -->|"Valeur"| CRITIC["Critic Head"]
-    end
-
-    %% Inférence & Entraînement
-    subgraph Inférence ["Serveur & Entraînement Ray"]
-        API["Serveur FastAPI (Port 3000)"]
-        RAY["Cluster Ray (League Training)"]
+        Learner["Learner Central (GPU/TPU)<br>Rétropropagation PPO"]
+        ParamServer["Parameter Server<br>(League Training)"]
         
-        API <-->|"JSON API"| Client["Clients (Omega/Neos)"]
-        RAY -->|"Sync Poids"| API
+        subgraph Workers ["RolloutWorkers Distribués (CPU)"]
+            W1["Worker 1<br>(ygoenv)"]
+            W2["Worker 2<br>(ygoenv)"]
+            WN["Worker N...<br>(ygoenv)"]
+        end
+        
+        SQLite[("Base SQLite<br>(Historique des parties)")]
+        
+        ParamServer -. "Poids Réseaux" .-> W1
+        ParamServer -. "Poids Réseaux" .-> W2
+        ParamServer -. "Poids Réseaux" .-> WN
+        
+        W1 -- "Trajectoires (États, Actions, Récompenses)" --> Learner
+        W2 -- "Trajectoires" --> Learner
+        WN -- "Trajectoires" --> Learner
+        
+        Learner -- "Gradients & Nouveaux Poids" --> ParamServer
+        W1 -. "Logs" .-> SQLite
     end
-
-    YGO -.->|"Transmission Observations"| OBS
-    PROBS -.->|"Action Choisie"| YGO
 ```
 
 ---
@@ -85,6 +110,9 @@ La preuve de concept fondatrice est validée :
 - **MVP Fonctionnel** : Le pipeline d'entraînement asynchrone **PPO Pur ("Cold Start")** est opérationnel en local via Ray.
 - **Stabilité prouvée** : Le pont entre Python et C++ au sein de l'environnement Gym (`ygoenv`) est stabilisé (gestion des épisodes de longueurs variables, remise à zéro sécurisée des états). L'environnement fonctionne de manière asynchrone et sans fuite de mémoire sur des threads CPU dédiés, laissant toute la puissance du GPU à la rétropropagation JAX.
 - **Jalon Actuel** : L'intégration 100% vectorisée de l'**Action Masking** sous JAX a drastiquement réduit l'entropie de l'agent, propulsant sa découverte de combos valides.
+
+![Metrics](assets/tensorboard_metrics.png)
+*Preuve de concept locale : Baisse de l'entropie et apprentissage initial sur mini-deck via RTX 3070 Ti, validant la rétropropagation des gradients sous JAX.*
 
 ---
 
@@ -134,8 +162,8 @@ Pour les chercheurs et évaluateurs souhaitant reproduire le système :
 
 Ce projet s'appuie fièrement sur des années de travaux open-source. Un immense merci à :
 - **[ygo-agent](https://github.com/sbl1996/ygo-agent)** (par sbl1996) pour l'inspiration fondamentale de l'environnement Gym et de l'architecture JAX originelle.
-- L'équipe de **ygopro-core / ocgcore** pour la maintenance incroyable du moteur de règles déterministe C++.
-- **Duelists Unite** pour la communauté YGO Omega et l'infrastructure de wrappers C# (`DuelBotWrapper`).
+- L'équipe de **[ygopro-core / ocgcore-KCG](https://github.com/knight00/ocgcore-KCG)** pour la maintenance incroyable du moteur de règles déterministe C++.
+- **[Duelists Unite](https://github.com/duelists-unite)** pour la communauté YGO Omega et l'infrastructure de wrappers C# (`DuelBotWrapper`).
 
 ---
 *Graphs de progression des victoires (Win Rate / Elo) & TensorBoard à venir lors du premier scale sur TPU !*
