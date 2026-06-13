@@ -1,164 +1,190 @@
 import math
-import numpy as np
+import jax
 import jax.numpy as jnp
+import numpy as np
 
 class MCTSNode:
-    def __init__(self, prior: float):
-        self.prior = prior
-        self.visit_count = 0
-        self.value_sum = 0.0
-        self.children = {}
-        self.hidden_state = None
-        self.reward = 0.0
-        self.is_expanded = False
+    """
+    Nœud de l'arbre MCTS pour Gumbel AlphaZero.
+    Stocke l'état caché du LSTM (carry_state) pour éviter de recalculer
+    toute la séquence depuis le début du duel.
+    """
+    def __init__(self, carry_state, action_mask, is_terminal=False, reward=0.0):
+        self.carry_state = carry_state
+        self.action_mask = action_mask
+        self.is_terminal = is_terminal
+        self.reward = reward
+        
+        self.children = {} # action (int) -> MCTSNode
+        self.N = 0 # Nombre de visites
+        self.W = 0.0 # Somme des valeurs (pour le joueur 0)
+        self.Q = 0.0 # Valeur moyenne
+        self.P = None # Probabilités a priori (Policy issue du réseau)
+        
+    def expand(self, action_probs: np.ndarray):
+        """Initialise les probabilités a priori (P)."""
+        self.P = action_probs
+        
+    def add_child(self, action: int, child_node: 'MCTSNode'):
+        self.children[action] = child_node
 
-    def value(self):
-        if self.visit_count == 0:
-            return 0.0
-        return self.value_sum / self.visit_count
+    def update(self, v: float):
+        """Met à jour les statistiques du nœud (Backpropagation)."""
+        self.N += 1
+        self.W += v
+        self.Q = self.W / self.N
 
 class MCTS:
-    def __init__(self, num_simulations: int = 16, c_puct: float = 1.25):
-        self.num_simulations = num_simulations
+    """
+    Recherche Arborescente Monte Carlo (MCTS) avec sélection PUCT et
+    variante Gumbel AlphaZero (ajout de bruit Gumbel à la racine).
+    """
+    def __init__(self, actor_critic, params, c_puct=1.25):
+        self.actor_critic = actor_critic
+        self.params = params
         self.c_puct = c_puct
+        self.act_dim = actor_critic.act_dim
 
-    def _puct_score(self, parent: MCTSNode, child: MCTSNode) -> float:
-        pb_c = math.log((parent.visit_count + 1.25 + 19652.0) / 19652.0) + self.c_puct
-        pb_c *= math.sqrt(parent.visit_count) / (child.visit_count + 1)
-        prior_score = pb_c * child.prior
-        value_score = child.value()
-        return value_score + prior_score
-
-    def search(self, env, agent, params, hidden_state, obs, legal_actions):
+    def evaluate_state(self, carry, obs, prev_action, action_mask, apply_gumbel=False):
         """
-        Effectue la recherche MCTS (Gumbel AlphaZero style) depuis l'état actuel.
-        env: l'environnement (doit supporter save_state() et restore_state())
-        agent: PPOAgent contenant la fonction forward()
-        params: paramètres de l'agent
-        hidden_state: état caché actuel (h, c) pour un seul élément (pas de batch dim)
-        obs: observation courante
-        legal_actions: masque booléen des actions légales
+        Évalue un état avec le réseau ActorCriticLSTM.
+        Si apply_gumbel est True, ajoute du bruit de Gumbel aux logits pour l'exploration.
         """
-        root = MCTSNode(0.0)
+        obs_jnp = jnp.expand_dims(jnp.array(obs, dtype=jnp.float32), 0)
+        prev_action_jnp = jnp.expand_dims(jnp.array(prev_action, dtype=jnp.int32), 0)
+        action_mask_jnp = jnp.expand_dims(jnp.array(action_mask, dtype=jnp.bool_), 0)
         
-        # 1. Expand root
-        obs_jax = jnp.expand_dims(jnp.asarray(obs), axis=0) if np.asarray(obs).ndim == 1 else jnp.asarray(obs)
-        probs, value, next_hidden_state = agent.forward(params, hidden_state, obs_jax)
+        new_carry, logits, value = self.actor_critic.apply(
+            self.params, carry, obs_jnp, prev_action_jnp, action_mask_jnp
+        )
         
-        probs_np = np.asarray(probs)
-        if probs_np.ndim > 1:
-            probs_np = probs_np.squeeze(0)
-        value = float(jnp.squeeze(value))
-        # Keep next_hidden_state as JAX array!
+        value = float(value[0, 0])
+        logits = np.array(logits[0])
         
-        # Apply legal actions mask
-        legal_actions = np.array(legal_actions, dtype=np.bool_)
-        probs_np = probs_np * legal_actions
-        sum_probs = np.sum(probs_np)
-        if sum_probs > 0:
-            probs_np /= sum_probs
+        # Masquer les actions illégales
+        mask_val = np.finfo(np.float32).min
+        valid_logits = np.where(action_mask, logits, mask_val)
+        
+        if apply_gumbel:
+            gumbel_noise = np.random.gumbel(size=valid_logits.shape)
+            valid_logits = np.where(action_mask, valid_logits + gumbel_noise, mask_val)
+            
+        # Softmax stable
+        max_logit = np.max(valid_logits)
+        exp_logits = np.exp(valid_logits - max_logit) * action_mask
+        sum_exp = np.sum(exp_logits)
+        
+        if sum_exp > 0:
+            probs = exp_logits / sum_exp
         else:
-            probs_np = legal_actions / max(np.sum(legal_actions), 1e-8)
+            probs = action_mask / max(np.sum(action_mask), 1e-8)
             
-        # Gumbel noise at root for exploration
-        gumbel_noise = np.random.gumbel(loc=0.0, scale=1.0, size=probs_np.shape)
-        gumbel_noise = gumbel_noise * legal_actions
+        return new_carry, probs, value
+
+    def select_child(self, node: MCTSNode) -> tuple[int, MCTSNode]:
+        """Sélectionne le meilleur nœud enfant selon la formule PUCT."""
+        best_action = -1
+        best_ucb = -float('inf')
         
-        # Add to logits-equivalent and softmax (Simplified Gumbel AlphaZero approach)
-        logits = np.log(probs_np + 1e-8) + gumbel_noise
-        exp_logits = np.exp(logits) * legal_actions
+        # First Play Urgency : on utilise le Q du parent pour les nœuds non explorés
+        fpu = node.Q if node.N > 0 else 0.0
         
-        sum_exp_logits = np.sum(exp_logits)
-        if sum_exp_logits > 0:
-            probs_with_noise = exp_logits / sum_exp_logits
-        else:
-            probs_with_noise = probs_np
-
-        root.is_expanded = True
-        root.hidden_state = next_hidden_state
-        for a in range(len(probs)):
-            if legal_actions[a]:
-                root.children[a] = MCTSNode(prior=float(probs_with_noise[a]))
-
-        # Save base environment state
-        base_state = env.save_state()
-
-        # 2. Simulations
-        for _ in range(self.num_simulations):
-            node = root
-            current_hidden = root.hidden_state
-            search_path = [node]
-            env.restore_state(base_state)
-            
-            # Selection
-            done = False
-            info = None
-            while node.is_expanded and len(node.children) > 0:
-                action, child = max(
-                    node.children.items(),
-                    key=lambda item: self._puct_score(node, item[1])
-                )
-                node = child
-                search_path.append(node)
-                obs, reward, terminated, truncated, info = env.step(action)
-                done = terminated or truncated
-                if node.is_expanded:
-                    current_hidden = node.hidden_state
-                
-            value_for_backprop = 0.0
-            
-            if not done:
-                # Expansion & Evaluation
-                obs_jax_step = jnp.expand_dims(jnp.asarray(obs), axis=0) if np.asarray(obs).ndim == 1 else jnp.asarray(obs)
-                probs_deep, value_deep, next_hidden_deep = agent.forward(params, current_hidden, obs_jax_step)
-                probs_deep_np = np.asarray(probs_deep)
-                if probs_deep_np.ndim > 1:
-                    probs_deep_np = probs_deep_np.squeeze(0)
-                value_for_backprop = float(jnp.squeeze(value_deep))
-                
-                # Assume all actions are legal in deeper nodes for simplicity if we don't have access to deep legal_actions
-                # In a real engine, we query legal actions after env.step()
-                if info is not None and "legal_actions" in info:
-                    legal_actions_deep = np.asarray(info["legal_actions"], dtype=np.bool_)
-                else:
-                    legal_actions_deep = np.ones_like(probs_deep_np, dtype=np.bool_)
-                    
-                probs_deep_np = probs_deep_np * legal_actions_deep
-                sum_probs = np.sum(probs_deep_np)
-                if sum_probs > 0:
-                    probs_deep_np /= sum_probs
-                else:
-                    probs_deep_np = legal_actions_deep / max(np.sum(legal_actions_deep), 1e-8)
-                    
-                node.is_expanded = True
-                node.hidden_state = next_hidden_deep
-                for a in range(len(probs_deep_np)):
-                    if legal_actions_deep[a]:
-                        node.children[a] = MCTSNode(prior=float(probs_deep_np[a]))
+        for action in np.where(node.action_mask)[0]:
+            if action in node.children:
+                child = node.children[action]
+                u = node.P[action] * self.c_puct * math.sqrt(node.N) / (1 + child.N)
+                ucb = child.Q + u
             else:
-                value_for_backprop = float(reward)
+                u = node.P[action] * self.c_puct * math.sqrt(node.N + 1e-8)
+                ucb = fpu + u
+                
+            if ucb > best_ucb:
+                best_ucb = ucb
+                best_action = int(action)
+                
+        return best_action, node.children.get(best_action, None)
 
-            # Backpropagation
-            for n in reversed(search_path):
-                n.value_sum += value_for_backprop
-                n.visit_count += 1
-                # Flip value for opponent if it's a 2-player zero-sum game with alternating turns
-                # Here we assume a single-agent perspective or symmetric zero-sum (simplification)
-                value_for_backprop = -value_for_backprop 
-
-        # Restore original env state
-        env.restore_state(base_state)
-
-        # 3. Policy Improvement
-        visit_counts = np.zeros(len(probs_with_noise))
-        for a, child in root.children.items():
-            visit_counts[a] = child.visit_count
-            
-        if np.sum(visit_counts) > 0:
-            policy_improved = visit_counts / np.sum(visit_counts)
-        else:
-            policy_improved = legal_actions / max(np.sum(legal_actions), 1e-8)
-            
-        action = np.argmax(policy_improved)
+    def search(self, env, obs, carry, prev_action, num_simulations=50):
+        """
+        Exécute la recherche MCTS à partir d'un état racine en utilisant env.clone().
+        """
+        root_mask = env.get_action_mask() if hasattr(env, 'get_action_mask') else env.get_legal_actions()
+        root_node = MCTSNode(carry, root_mask, is_terminal=False)
         
-        return int(action), policy_improved
+        # Évaluation de la racine avec bruit Gumbel (Gumbel AlphaZero)
+        _, root_probs, _ = self.evaluate_state(carry, obs, prev_action, root_mask, apply_gumbel=True)
+        root_node.expand(root_probs)
+        
+        for _ in range(num_simulations):
+            node = root_node
+            sim_env = env.clone() # Action Replay (State Cloning)
+            path = [node]
+            
+            # 1. Selection
+            action_taken = prev_action
+            while not node.is_terminal:
+                action, next_node = self.select_child(node)
+                action_taken = action
+                if next_node is None:
+                    break
+                    
+                # On avance dans l'environnement cloné
+                step_obs, step_reward, terminated, truncated, _ = sim_env.step(action)
+                node = next_node
+                path.append(node)
+                
+            # 2. Expansion
+            if not node.is_terminal:
+                if action_taken == -1:
+                    # Plus d'actions légales possibles, état bloqué
+                    node.is_terminal = True
+                    v = node.reward
+                    for n in path:
+                        n.update(v)
+                    continue
+                    
+                # Appliquer l'action trouvée lors de la sélection
+                step_obs, step_reward, terminated, truncated, _ = sim_env.step(action_taken)
+                new_mask = sim_env.get_legal_actions()
+                
+                new_carry, probs, value = self.evaluate_state(
+                    node.carry_state, step_obs, action_taken, new_mask, apply_gumbel=False
+                )
+                
+                new_node = MCTSNode(new_carry, new_mask, is_terminal=terminated, reward=step_reward)
+                new_node.expand(probs)
+                node.add_child(action_taken, new_node)
+                
+                path.append(new_node)
+                v = value
+            else:
+                v = node.reward
+                
+            # 3. Backpropagation
+            # Le jeu est modélisé de la perspective du Joueur 0. 
+            # Les rewards de env.py sont déjà globaux (1.0 pour victoire P0, -1.0 pour P1).
+            for n in path:
+                n.update(v)
+                
+        return root_node
+
+    def get_action_probs(self, root_node: MCTSNode, temperature=1.0) -> np.ndarray:
+        """Calcule les probabilités d'action finales basées sur les visites MCTS."""
+        action_visits = np.zeros(self.act_dim, dtype=np.float32)
+        for action, child in root_node.children.items():
+            action_visits[action] = child.N
+            
+        if temperature == 0:
+            best_action = np.argmax(action_visits)
+            probs = np.zeros_like(action_visits)
+            probs[best_action] = 1.0
+            return probs
+            
+        action_visits = action_visits ** (1.0 / temperature)
+        sum_visits = np.sum(action_visits)
+        if sum_visits > 0:
+            probs = action_visits / sum_visits
+        else:
+            probs = root_node.action_mask / max(np.sum(root_node.action_mask), 1e-8)
+            
+        return probs
