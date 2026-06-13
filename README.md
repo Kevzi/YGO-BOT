@@ -46,9 +46,9 @@ graph TD
     W3 -- "Batch Rollouts" --> L
     
     L -- "Push Updated Weights" --> PS
-    PS -- "Pull Latest/Historical Weights<br/>(League Training)" -.-> W1
-    PS -- "Pull Weights" -.-> W2
-    PS -- "Pull Weights" -.-> W3
+    PS -. "Pull Latest/Historical Weights<br/>(League Training)" .-> W1
+    PS -. "Pull Weights" .-> W2
+    PS -. "Pull Weights" .-> W3
 ```
 
 - **Rollout Workers (CPU)**: Hundreds of lightweight actors run the C++ Yu-Gi-Oh! engine (`libocgcore`) to simulate games in parallel. They are restricted from GPU access to avoid VRAM bottlenecks.
