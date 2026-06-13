@@ -71,7 +71,11 @@ class Learner:
                 all_ret.append(ret)
                 all_lp.append(r["log_probs"])
                 all_dones.append(r["dones"])
-                
+            if not all_states:
+                import logging
+                logging.warning("Batch d'observations vide (all_states est vide). Ignoré.")
+                return
+
             obs_batch = np.concatenate(all_states, axis=0)
             mask_batch = np.concatenate(all_masks, axis=0).astype(bool)
             act_batch = np.concatenate(all_actions, axis=0)
@@ -105,9 +109,6 @@ class RolloutWorker:
     les trajectoires générées dans la Queue.
     """
     def __init__(self, parameter_server_handle, queue_handle, obs_dim, act_dim, worker_id):
-        import os
-        os.environ["JAX_PLATFORMS"] = "cpu"
-        os.environ["CUDA_VISIBLE_DEVICES"] = ""
         
         self.parameter_server = parameter_server_handle
         self.queue = queue_handle
@@ -174,6 +175,7 @@ class RolloutWorker:
             
             probs = np.asarray(probs).flatten()
             masked_probs = probs
+            masked_probs = masked_probs / np.sum(masked_probs)
                 
             # --- BYPASS MCTS POUR LE COLD START (MVP) ---
             use_mcts = False  # Activé plus tard quand le modèle de base sera pré-entraîné
@@ -198,7 +200,7 @@ class RolloutWorker:
             done = terminated or truncated
             
             if done:
-                print(f"--- Partie terminée ! Récompense finale : {reward} | Truncated : {truncated} | Longueur (cette boucle) : {total_env_steps} ---")
+
             if current_player == 0:
                 states.append(obs)
                 masks.append(mask)

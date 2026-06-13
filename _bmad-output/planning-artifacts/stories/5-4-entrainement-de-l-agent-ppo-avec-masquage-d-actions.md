@@ -54,4 +54,15 @@
 - Removed Numpy probability mask and integrated -1e9 mask inside ActorCriticLSTM. `env.py` now correctly provides `get_legal_actions()` as `get_action_mask()`.
 
 ## Status
-Status: review
+Status: done
+
+### Review Findings
+- [x] [Review][Patch] Remove unauthorized hardware modifications (JAX_PLATFORMS/CUDA_VISIBLE_DEVICES) in constructors [`ai/distributed.py`, `ai/self_play.py`]
+- [x] [Review][Patch] Revert Life Points to 8000 [`core/ygoenv/wrapper.py`]
+- [x] [Review][Patch] Revert deck size to 40 cards and max_turns to 100 [`core/ygoenv/env.py`]
+- [x] [Review][Patch] Revert max_history to 50 in SelfPlayManager [`ai/self_play.py`]
+- [x] [Review][Patch] Add SQLite transient files (.db-shm, .db-wal) to .gitignore [`.gitignore`]
+- [x] [Review][Patch] Remove leftover debug print statement in distributed loop [`ai/distributed.py`]
+- [x] [Review][Patch] Guard against empty observation batch in concatenate [`ai/distributed.py`]
+- [x] [Review][Patch] Normalize softmax probabilities before np.random.choice [`ai/distributed.py`]
+- [x] [Review][Patch] Cast get_legal_actions() output to boolean numpy array [`core/ygoenv/env.py`]

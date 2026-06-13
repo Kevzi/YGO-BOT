@@ -68,7 +68,7 @@ development_status:
   5-1-espace-d-actions-discretise: done
   5-2-auto-completion-et-ciblage-dynamique: done
   5-3-observation-complete-a-156-slots: done
-  5-4-entrainement-de-l-agent-ppo-avec-masquage-d-actions: review
+  5-4-entrainement-de-l-agent-ppo-avec-masquage-d-actions: done
   epic-5-retrospective: optional
   epic-6: backlog
   6-1-integration-lstm-et-etat-de-croyance: backlog

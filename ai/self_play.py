@@ -9,10 +9,7 @@ class SelfPlayManager:
     Gestionnaire centralisé pour le League Training.
     Stocke les snapshots historiques du modèle et sert de Parameter Server pour les poids récents.
     """
-    def __init__(self, max_history=10):
-        import os
-        os.environ["JAX_PLATFORMS"] = "cpu"
-        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    def __init__(self, max_history=50):
 
         self.history = []
         self.max_history = max_history
