@@ -1,35 +1,45 @@
-# YGO-BOT 🃏🤖
+# YGO Bot: Autonomous Intelligent Agent for Yu-Gi-Oh! Omega using Deep RL and LLMs
 
 ![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi)
 ![JAX](https://img.shields.io/badge/JAX-Powered-orange?style=for-the-badge)
 ![Ray](https://img.shields.io/badge/Ray-Distributed-blue?style=for-the-badge)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue?style=for-the-badge&logo=python)
 
-**YGO-BOT** est une intelligence artificielle de recherche développée pour maîtriser Yu-Gi-Oh!, un jeu à information imparfaite (POMDP) avec un espace d'états colossal. Conçu pour le **Google TPU Research Cloud (TRC)**, ce bot s'interface directement avec le moteur officiel en C++ (`ocgcore`) pour garantir 100% de précision sur les règles, tout en apprenant via **Proximal Policy Optimization (PPO)**.
+## 1. Résumé Scientifique
 
-Contrairement aux approches classiques, YGO-BOT utilise une **généralisation sémantique Zero-Shot** : l'agent "lit" les effets des cartes via des LLM embeddings, lui permettant de jouer des decks qu'il n'a jamais vus durant l'entraînement.
+Yu-Gi-Oh! n'est pas qu'un simple jeu de cartes, c'est un problème mathématique extrêmement complexe, formellement classé comme **Π₁¹-complet**. L'environnement de jeu est un **Processus de Décision Markovien Partiellement Observable (POMDP)** caractérisé par :
+- Un **espace d'états gigantesque** (> 10 000 cartes uniques).
+- Une **forte asymétrie d'information** (cartes face cachée, brouillard de guerre sur la main adverse).
+- Des **chaînes de résolution d'effets profondément imbriquées** à chaque étape.
+
+**L'Objectif de ce projet** est d'atteindre des performances surhumaines et une capacité de **Zero-shot generalization** en séparant strictement l'exécution du moteur de règles déterministe (C++) de la prise de décision stratégique (JAX/Ray).
 
 ---
 
-## 🏛️ Architecture du Projet
+## 2. Architecture Technique
 
-Le système repose sur un découplage strict entre la simulation (CPU) et l'apprentissage (GPU/TPU), orchestré par **Ray**. L'inférence est servie via une API **FastAPI** locale ultra-rapide (<100ms) pour s'interfacer avec des clients lourds comme YGO Omega.
+Pour résoudre un tel problème, ce projet déploie une stack technologique de pointe conçue pour maximiser l'efficacité de l'infrastructure matérielle (GPU/TPU) :
+
+- **Le Cerveau (Deep RL sous JAX)** : Utilisation de **JAX** pour la compilation Just-In-Time (XLA) et la vectorisation massive sur accélérateurs matériels. Le modèle repose sur l'algorithme **PPO (Proximal Policy Optimization)** combiné à des couches **LSTM** pour modéliser la mémoire temporelle de l'agent et gérer l'état de croyance (*Belief State*) face aux informations cachées.
+- **La Planification (Gumbel AlphaZero & IS-MCTS)** : Implémentation avancée de la recherche arborescente de Monte-Carlo pour l'anticipation temporelle des coups et la modélisation sous brouillard de guerre.
+- **L'Orchestration Distribuée (Ray)** : Ce projet est nativement configuré avec le **Ray Cluster Launcher** pour être déployé à très grande échelle sur des clusters Cloud, notamment le **Google TPU Research Cloud (TRC)**.
+- **L'Action Masking & Le Moteur C++** : Pour éviter le tâtonnement aveugle (End-to-End), l'IA s'appuie sur la bibliothèque C++ hautement optimisée `ocgcore`. À chaque milliseconde, le moteur valide les états et retourne un masque d'actions binaires strict qui bloque mathématiquement toute action illégale (pénalité `-1e9` avant le Softmax).
 
 ```mermaid
 graph TD
     %% Moteur et Environnement
-    subgraph Environnement ["Environnement (CPU)"]
-        CPP["Moteur ocgcore (C++)"]
-        YGO["YgoEnv (Wrapper Gym Python)"]
+    subgraph Environnement ["Environnement (CPU) - ocgcore"]
+        CPP["Moteur C++ (ocgcore)"]
+        YGO["Wrapper Python (YgoEnv)"]
         CPP -->|"Etats du Jeu & Actions Légales"| YGO
         YGO -->|"Observations Vectorisées (156 slots)"| CPP
     end
 
     %% Réseau de Neurones
     subgraph Modele ["Modèle PPO (JAX/Flax)"]
-        OBS["Observation (60,694 dimensions)"]
-        LSTM["Cellule LSTM (Mémoire & Croyance)"]
-        MASK["Action Masking (JAX -1e9)"]
+        OBS["Observation (60,694 dims)"]
+        LSTM["Cellule LSTM (Belief State)"]
+        MASK["Action Masking (-1e9)"]
         
         OBS --> LSTM
         LSTM -->|"Logits (Actor)"| MASK
@@ -38,51 +48,94 @@ graph TD
     end
 
     %% Inférence & Entraînement
-    subgraph Inférence ["Serveur & Entraînement"]
+    subgraph Inférence ["Serveur & Entraînement Ray"]
         API["Serveur FastAPI (Port 3000)"]
-        RAY["Cluster Ray (Apprentissage League)"]
-        DB[(Base de données SQLite)]
+        RAY["Cluster Ray (League Training)"]
         
-        API <-->|"JSON API"| Client["Client (YGO Omega / Neos)"]
-        RAY -->|"Mise à jour des poids"| API
-        RAY -->|"Historique & Stats"| DB
+        API <-->|"JSON API"| Client["Clients (Omega/Neos)"]
+        RAY -->|"Sync Poids"| API
     end
 
     YGO -.->|"Transmission Observations"| OBS
     PROBS -.->|"Action Choisie"| YGO
 ```
 
-### ✨ Fonctionnalités Clés
+---
 
-1. **Intégration C++ `ocgcore`** : Un wrapper Python bas-niveau (`YgoEngine`) qui interroge directement le moteur officiel pour valider les actions, empêchant toute hallucination de l'IA.
-2. **Action Masking Natif JAX** : Un système qui masque instantanément les actions illégales (pénalité de `-1e9` avant le Softmax) directement dans le graphe de calcul compilé par XLA, annulant l'exploration inutile.
-3. **Observation Dense (156 Slots)** : Représentation mathématique complète du terrain (Mains, Cimetières, Zones Monstres/Magies, Banni) pour les deux joueurs, fusionnée avec l'historique des actions.
-4. **Apprentissage Distribué** : Les Rollout Workers tournent sur des cœurs CPU isolés tandis que le Learner centralise la descente de gradient sur TPU.
+## 3. L'Innovation : Le "Zero-Shot" via les Embeddings LLM
+
+Face au mur combinatoire que représentent des dizaines de milliers de "nouvelles cartes", une approche basée sur des identifiants statiques (passcodes) est vouée à l'échec.
+Au lieu de cela, **YGO Bot convertit les descriptions textuelles officielles des cartes (PSCT) via un Grand Modèle de Langage (LLM)** pour générer des représentations vectorielles continues de 384 dimensions (`embed.pkl`). 
+Cette projection sémantique permet à l'IA de comprendre et de transférer sa connaissance des mécaniques de jeu vers des **cartes qu'elle n'a jamais rencontrées à l'entraînement**.
 
 ---
 
-## 🚀 Installation & Lancement
+## 4. Le Pipeline de Données et l'Intégration
 
-Prérequis : Python 3.10+, `ocgcore.dll` compilé dans `core/ygoenv/`.
-
-```bash
-# 1. Installation des dépendances (Poetry)
-poetry install
-
-# 2. Démarrage de l'entraînement distribué
-python scripts/train_distributed.py
-
-# 3. Lancement du serveur d'inférence (FastAPI) pour affronter le bot
-uvicorn src.api.main:app --reload --port 3000
-```
+Ce projet n'est pas un simple prototype, c'est un écosystème interconnecté :
+- **Synchronisation des Données** : Automatisation de la mise à jour des données (nouveaux sets de cartes, métagame) via l'utilisation des API officielles de **YGOPRODeck** (TypeScript/Dart).
+- **Interopérabilité des Decks** : Intégration de `omega-api-decks` pour parser dynamiquement les formats hétérogènes de l'écosystème communautaire (`.ydk`, JSON, code Omega).
+- **Déploiement API temps réel** : Le modèle JAX est encapsulé dans une **API FastAPI**. Grâce au typage et au chargeur *In-Memory*, l'inférence offre des temps de réponse ultra-faibles (< 100 ms) pour affronter des joueurs humains via les clients lourds comme **YGO Omega** (via `DuelBotWrapper` C#) ou le client web **Neos**.
 
 ---
 
-## 📈 Demande de Subvention Google TRC
+## 5. L'État d'Avancement Actuel (MVP)
 
-Ce projet est conçu sur-mesure pour maximiser l'utilisation de l'architecture **TPU v4** de Google. En séparant la génération de trajectoires (très coûteuse en CPU à cause de l'arborescence des effets Yu-Gi-Oh!) de la rétropropagation du gradient (qui est 100% écrite en JAX pur), YGO-BOT permet une scalabilité horizontale parfaite. 
-
-Nous sollicitons la puissance du réseau TRC pour valider notre approche d'**Embeddings Zero-Shot**, qui nécessite l'ingestion de millions de parties pour apprendre les corrélations syntaxiques des 10 000+ cartes du jeu.
+La preuve de concept fondatrice est validée :
+- **MVP Fonctionnel** : Le pipeline d'entraînement asynchrone **PPO Pur ("Cold Start")** est opérationnel en local via Ray.
+- **Stabilité prouvée** : Le pont entre Python et C++ au sein de l'environnement Gym (`ygoenv`) est stabilisé (gestion des épisodes de longueurs variables, remise à zéro sécurisée des états). L'environnement fonctionne de manière asynchrone et sans fuite de mémoire sur des threads CPU dédiés, laissant toute la puissance du GPU à la rétropropagation JAX.
+- **Jalon Actuel** : L'intégration 100% vectorisée de l'**Action Masking** sous JAX a drastiquement réduit l'entropie de l'agent, propulsant sa découverte de combos valides.
 
 ---
-*Construit depuis zéro en Python/JAX pour la communauté de recherche en IA et les duellistes.*
+
+## 6. Pourquoi nous avons besoin de Google TRC ?
+
+Ce projet a franchi la phase 1 : sur une architecture grand public (ex: RTX 3070 Ti), l'agent converge avec succès et découvre des synergies de base sur des decks statiques grâce à PPO.
+
+Cependant, nous faisons désormais face au **Mur du Calcul**.
+Pour qu'un modèle RL de cette ampleur (POMDP, espace d'observation de 60,694 dimensions) atteigne un niveau "Championnat" capable de s'adapter dynamiquement au métagame, il doit affronter des dizaines de millions de scénarios via le paradigme du **League Training** (l'agent joue en boucle contre des versions antérieures de lui-même).
+Par ailleurs, activer la véritable anticipation arborescente (IS-MCTS / Gumbel AlphaZero) entraîne des coûts computationnels massifs liés au *Action Replay* de l'état C++ du jeu pour simuler les futurs possibles.
+
+**La conclusion est simple :** L'algorithme mathématique converge, le code est massivement parallélisable. Nous sollicitons désormais la puissance colossale des TPUs Google (via Ray) pour propulser l'agent au-delà du potentiel d'un joueur humain.
+
+---
+
+## 7. Installation et Reproduction
+
+Pour les chercheurs et évaluateurs souhaitant reproduire le système :
+
+1. **Clonage du repo** :
+   ```bash
+   git clone https://github.com/Kevzi/YGO-BOT.git
+   cd YGO-BOT
+   ```
+
+2. **Configuration Python (Poetry)** (Requis: Python 3.10+ / JAX) :
+   ```bash
+   poetry install
+   ```
+   *Assurez-vous que le moteur `ocgcore.dll` est compilé dans le dossier `core/ygoenv/`.*
+
+3. **Lancement des Workers Locaux** :
+   Veillez à ce que les processus RolloutWorkers s'exécutent strictement sur le CPU :
+   ```bash
+   export JAX_PLATFORMS="cpu" 
+   python scripts/train_distributed.py
+   ```
+
+4. **Serveur d'Inférence** (Pour affronter le bot) :
+   ```bash
+   uvicorn src.api.main:app --reload --port 3000
+   ```
+
+---
+
+## 8. Remerciements et Crédits
+
+Ce projet s'appuie fièrement sur des années de travaux open-source. Un immense merci à :
+- **[ygo-agent](https://github.com/sbl1996/ygo-agent)** (par sbl1996) pour l'inspiration fondamentale de l'environnement Gym et de l'architecture JAX originelle.
+- L'équipe de **ygopro-core / ocgcore** pour la maintenance incroyable du moteur de règles déterministe C++.
+- **Duelists Unite** pour la communauté YGO Omega et l'infrastructure de wrappers C# (`DuelBotWrapper`).
+
+---
+*Graphs de progression des victoires (Win Rate / Elo) & TensorBoard à venir lors du premier scale sur TPU !*
