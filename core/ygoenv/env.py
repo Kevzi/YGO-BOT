@@ -234,7 +234,11 @@ class YgoEnv(gym.Env):
         legal_actions = self.get_legal_actions()
         obs = self._get_observation()
         
-        return obs, {"legal_actions": legal_actions}
+        current_player = 0
+        if self._current_state_actions and len(self._current_state_actions) > 0:
+            current_player = self._current_state_actions[0].get("player", 0)
+            
+        return obs, {"legal_actions": legal_actions, "current_player": current_player}
         
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict]:
         if self._current_state is None:
@@ -253,10 +257,10 @@ class YgoEnv(gym.Env):
         self.engine.translate_and_set_response(action, self._current_state_actions)
         
         # Le moteur simule le reste jusqu'à la prochaine attente
-        new_actions = self.engine.get_legal_actions(self._current_state)
+        legal_actions_mask = self.get_legal_actions()
         
         # Parser les messages pour chercher MSG_WIN (5) ou autres events importants
-        for a in new_actions:
+        for a in self._current_state_actions:
             if a.get("msg") == "WIN":
                 terminated = True
                 # player 0 = nous, player 1 = adversaire, player 2 = draw
@@ -275,7 +279,16 @@ class YgoEnv(gym.Env):
             truncated = True
             
         obs = self._get_observation()
-        info = {"legal_actions": new_actions}
+        
+        # Déterminer le joueur courant
+        current_player = 0
+        if self._current_state_actions and len(self._current_state_actions) > 0:
+            current_player = self._current_state_actions[0].get("player", 0)
+            
+        info = {
+            "legal_actions": legal_actions_mask,
+            "current_player": current_player
+        }
         
         return obs, reward, terminated, truncated, info
 
