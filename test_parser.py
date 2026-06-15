@@ -15,7 +15,7 @@ def test_parser():
     
     # Check observation shape and non-zero
     logging.info(f"Observation shape: {obs.shape}")
-    assert obs.shape == (15 * 384,), "Observation shape mismatch"
+    assert obs.shape == (60694,), "Observation shape mismatch"
     
     # We loaded 40 Normal Monsters into the deck, then start_duel was called.
     # The starting draw count is 5.

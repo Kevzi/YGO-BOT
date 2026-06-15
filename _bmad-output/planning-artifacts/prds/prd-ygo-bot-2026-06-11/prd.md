@@ -31,6 +31,7 @@ updated: "2026-06-11"
 - **FR-1.2 Apprentissage par Renforcement (RL) :** Utilisation de l'algorithme PPO sous le framework JAX.
 - **FR-1.3 Mémoire et Bluff :** Intégration de réseaux LSTM pour la mémoire à court/long terme.
 - **FR-1.4 Planification et Anticipation :** Implémentation de MCTS (Gumbel AlphaZero) pour anticiper les coups futurs face aux informations cachées.
+- **FR-1.5 Apprentissage par Imitation (Behavioral Cloning) :** Ingestion de fichiers replays (`.yrp`) pour bootstrapper la politique du modèle JAX avant de passer au Self-Play pur, accélérant l'acquisition des bases stratégiques.
 
 ### 4.2. Moteur de Règles et Environnement
 - **FR-2.1 Séparation Logique :** Le bot ne calcule pas les règles. Il interroge un moteur C++ ultra-rapide (ocgcore/ygopro-core, scripté en Lua) pour valider les actions légales et résoudre les chaînes.

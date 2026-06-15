@@ -22,5 +22,5 @@ echo "Compilation en cours..."
 make -C build config=release ocgcoreshared
 
 echo "Déplacement du binaire compilé..."
-cp bin/release/libocgcore.so ../ygoenv/ || echo "Erreur de copie"
+cp bin/release/libocgcore.so ../ || echo "Erreur de copie"
 echo "Compilation terminée avec succès !"

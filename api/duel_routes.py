@@ -7,7 +7,7 @@ from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
 
 from core.ygoenv.wrapper import YgoEngine, EngineCrashError
-from ai.agent import DummyAgent
+from ai.inference import PPOInferenceAgent
 from db.session import get_db
 from db.models import GameTransition
 
@@ -19,12 +19,12 @@ router = APIRouter()
 engine = YgoEngine()
 
 def get_agent():
-    return DummyAgent()
+    return PPOInferenceAgent()
 
 class GameState(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="allow")
-    current_phase: int
-    turn_player: int
+    action_type: str
+    data: Dict[str, Any]
 
 class GameStateRequest(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
@@ -35,11 +35,12 @@ class GameStateRequest(BaseModel):
 class ActionResponse(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
     
-    action_type: int
+    action_type: str
+    action_idx: int
     card_id: Optional[int] = None
 
 @router.post("/v1/actions", response_model=ActionResponse)
-def fetch_legal_actions(request: GameStateRequest, db: Session = Depends(get_db), agent: DummyAgent = Depends(get_agent)):
+def fetch_legal_actions(request: GameStateRequest, db: Session = Depends(get_db), agent: PPOInferenceAgent = Depends(get_agent)):
     global engine
     try:
         try:
@@ -48,12 +49,78 @@ def fetch_legal_actions(request: GameStateRequest, db: Session = Depends(get_db)
             raise HTTPException(status_code=400, detail="duel_id must be an integer")
             
         state_dict = request.game_state.model_dump(by_alias=False)
-        actions = engine.get_legal_actions(state_dict)
+        
+        # Determine if payload is from OmegaBotWrapper Actions.cs
+        if "action_type" in state_dict:
+            # Bypass engine and construct actions directly from Omega JSON
+            action_type = state_dict["action_type"]
+            omega_data = state_dict.get("data", {})
+            choices = []
+            idx_counter = 0
+            
+            if action_type == "OnIdleCmd":
+                for card in omega_data.get("SummonableCards", []):
+                    choices.append({"type": "Summon", "action_idx": idx_counter, "code": card.get("Code", 0)})
+                    idx_counter += 1
+                for card in omega_data.get("SpecialSummonableCards", []):
+                    choices.append({"type": "SpSummon", "action_idx": idx_counter, "code": card.get("Code", 0)})
+                    idx_counter += 1
+                for card in omega_data.get("ActivableCards", []):
+                    choices.append({"type": "Activate", "action_idx": idx_counter, "code": card.get("Code", 0)})
+                    idx_counter += 1
+                for card in omega_data.get("MonsterSetableCards", []):
+                    choices.append({"type": "MonsterSet", "action_idx": idx_counter, "code": card.get("Code", 0)})
+                    idx_counter += 1
+                for card in omega_data.get("SpellSetableCards", []):
+                    choices.append({"type": "SpellSet", "action_idx": idx_counter, "code": card.get("Code", 0)})
+                    idx_counter += 1
+                for card in omega_data.get("ReposableCards", []):
+                    choices.append({"type": "Reposition", "action_idx": idx_counter, "code": card.get("Code", 0)})
+                    idx_counter += 1
+                if omega_data.get("CanBattlePhase"):
+                    choices.append({"type": "ToBattlePhase", "action_idx": idx_counter})
+                    idx_counter += 1
+                if omega_data.get("CanEndPhase", True):
+                    choices.append({"type": "ToEndPhase", "action_idx": idx_counter})
+                    idx_counter += 1
+                actions = [{"msg": "MSG_SELECT_IDLECMD", "choices": choices}]
+                
+            elif action_type == "OnBattleCmd":
+                for card in omega_data.get("AttackableCards", []):
+                    choices.append({"type": "Attack", "action_idx": idx_counter, "code": card.get("Code", 0)})
+                    idx_counter += 1
+                for card in omega_data.get("ActivableCards", []):
+                    choices.append({"type": "Activate", "action_idx": idx_counter, "code": card.get("Code", 0)})
+                    idx_counter += 1
+                if omega_data.get("CanMainPhaseTwo"):
+                    choices.append({"type": "ToMainPhaseTwo", "action_idx": idx_counter})
+                    idx_counter += 1
+                if omega_data.get("CanEndPhase", True):
+                    choices.append({"type": "ToEndPhase", "action_idx": idx_counter})
+                    idx_counter += 1
+                actions = [{"msg": "MSG_SELECT_BATTLECMD", "choices": choices}]
+                
+            elif action_type == "OnSelectCard":
+                choices.append({"type": "SelectCard", "action_idx": 0})
+                actions = [{"msg": "MSG_SELECT_CARD", "choices": choices}]
+                
+            elif action_type == "OnSelectChain":
+                if not omega_data.get("Forced"):
+                    choices.append({"type": "Skip", "action_idx": idx_counter})
+                    idx_counter += 1
+                choices.append({"type": "Activate", "action_idx": idx_counter})
+                idx_counter += 1
+                actions = [{"msg": "MSG_SELECT_CHAIN", "choices": choices}]
+            
+            logger.info(f"Omega [{action_type}] -> {len(choices)} choices: {[c['type'] for c in choices]}")
+        else:
+            # Fallback to YgoEngine logic if standard payload
+            actions = engine.get_legal_actions(state_dict)
         
         if not actions:
-            raise HTTPException(status_code=400, detail="No legal actions returned by engine")
+            raise HTTPException(status_code=400, detail="No legal actions available")
         
-        chosen_action = agent.select_action(actions)
+        chosen_action = agent.select_action(actions, engine, state_dict)
         
         if "action_type" not in chosen_action:
             raise ValueError("action_type is missing from engine output")
@@ -73,6 +140,7 @@ def fetch_legal_actions(request: GameStateRequest, db: Session = Depends(get_db)
             
         return ActionResponse(
             action_type=chosen_action["action_type"],
+            action_idx=chosen_action.get("action_idx", -1),
             card_id=chosen_action.get("card_id")
         )
     except EngineCrashError as e:

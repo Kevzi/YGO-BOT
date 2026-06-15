@@ -2,7 +2,8 @@ import jax
 import jax.numpy as jnp
 import optax
 import math
-from ai.network import ActorCriticLSTM, init_hidden_state
+from functools import partial
+from ai.network import PPOActorCritic
 
 class PPOAgent:
     def __init__(self, obs_dim: int, act_dim: int, hidden_dim: int = 512, learning_rate: float = 3e-4):
@@ -13,7 +14,7 @@ class PPOAgent:
         self.act_dim = act_dim
         self.hidden_dim = hidden_dim
         
-        self.model = ActorCriticLSTM(act_dim=act_dim, hidden_dim=hidden_dim)
+        self.model = PPOActorCritic(action_dim=act_dim, hidden_size=hidden_dim)
         # Patch: Missing gradient clipping
         self.optimizer = optax.chain(
             optax.clip_by_global_norm(1.0),
@@ -22,32 +23,34 @@ class PPOAgent:
         
     def init_hidden_state(self, batch_size: int) -> tuple[jnp.ndarray, jnp.ndarray]:
         """Initialise l'état caché (h, c) pour un batch."""
-        return init_hidden_state(batch_size, self.hidden_dim)
+        return PPOActorCritic.initialize_carry(batch_size, self.hidden_dim)
 
     def init_params(self, rng: jax.random.PRNGKey) -> tuple[dict, optax.OptState]:
         """Initialise les poids du modèle Flax et l'état de l'optimiseur."""
-        dummy_obs = jnp.zeros((1, self.obs_dim), dtype=jnp.float32)
-        dummy_prev_action = jnp.zeros((1,), dtype=jnp.int32)
-        dummy_mask = jnp.zeros((1, self.act_dim), dtype=jnp.bool_)
+        dummy_obs = jnp.zeros((1, 1, self.obs_dim), dtype=jnp.float32)
+        dummy_prev_act = jnp.zeros((1, 1), dtype=jnp.int32)
+        dummy_mask = jnp.zeros((1, 1, self.act_dim), dtype=jnp.bool_)
+        dummy_dones = jnp.zeros((1, 1), dtype=jnp.float32)
         dummy_carry = self.init_hidden_state(1)
         
-        variables = self.model.init(rng, dummy_carry, dummy_obs, dummy_prev_action, dummy_mask)
+        variables = self.model.init(rng, dummy_carry, dummy_obs, dummy_prev_act, dummy_mask, dummy_dones)
         params = variables['params']
         
         opt_state = self.optimizer.init(params)
         return params, opt_state
 
+    @partial(jax.jit, static_argnums=(0,))
+    def _forward_jit(self, params, hidden_state, obs_seq, prev_action_seq, action_mask_seq, dones_seq):
+        """Passage forward compilé XLA (très rapide, pas de fuite mémoire Python)."""
+        return self.model.apply(
+            {'params': params}, hidden_state, obs_seq, prev_action_seq, action_mask_seq, dones_seq
+        )
+
     def forward(self, params: dict, hidden_state: tuple[jnp.ndarray, jnp.ndarray], obs: jnp.ndarray, prev_action: jnp.ndarray, action_mask: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray, tuple[jnp.ndarray, jnp.ndarray]]:
         """Forward pass public pour l'inférence. Retourne les probabilités, la Value et le nouvel état caché."""
         if obs.ndim not in (1, 2):
             raise ValueError(f"Invalid observation shape: {obs.shape}. Expected 1D or 2D array.")
-        if obs.ndim != action_mask.ndim:
-            raise ValueError(f"obs.ndim ({obs.ndim}) != action_mask.ndim ({action_mask.ndim})")
-        if action_mask.shape[-1] != self.act_dim:
-            raise ValueError(f"action_mask.shape[-1] ({action_mask.shape[-1]}) != {self.act_dim}")
-        if obs.shape[-1] != self.obs_dim:
-            raise ValueError(f"obs.shape[-1] ({obs.shape[-1]}) != {self.obs_dim}")
-            
+        
         action_mask = jnp.asarray(action_mask, dtype=jnp.bool_)
         
         is_single = obs.ndim == 1
@@ -59,71 +62,30 @@ class PPOAgent:
             h, c = hidden_state
             if h.ndim == 1:
                 hidden_state = (jnp.expand_dims(h, axis=0), jnp.expand_dims(c, axis=0))
-            
-        if obs.shape[0] != action_mask.shape[0]:
-            raise ValueError(f"Batch size mismatch: obs {obs.shape[0]} != action_mask {action_mask.shape[0]}")
-            
+                
         action_mask = jnp.where(~jnp.any(action_mask, axis=-1, keepdims=True), True, action_mask)
         
-        next_hidden_state, logits, value = self.model.apply({'params': params}, hidden_state, obs, prev_action, action_mask)
+        # Add time dimension for PPOActorCritic sequence requirement
+        obs_seq = jnp.expand_dims(obs, axis=1)
+        prev_action_seq = jnp.expand_dims(prev_action, axis=1)
+        action_mask_seq = jnp.expand_dims(action_mask, axis=1)
+        dones_seq = jnp.zeros((obs.shape[0], 1), dtype=jnp.float32)
+        # Appeler la méthode JIT-compilée
+        next_hidden_state, logits_seq, value_seq = self._forward_jit(
+            params, hidden_state, obs_seq, prev_action_seq, action_mask_seq, dones_seq
+        )
+        
+        # Remove time dimension
+        logits = logits_seq[:, 0, :]
+        value = value_seq[:, 0]
         
         probs = jax.nn.softmax(logits, axis=-1)
         
         if is_single:
-            return probs[0], value[0, 0], (next_hidden_state[0][0], next_hidden_state[1][0])
-        return probs, value[..., 0], next_hidden_state
+            return probs[0], value[0], (next_hidden_state[0][0], next_hidden_state[1][0])
+        return probs, value, next_hidden_state
 
-    def _forward_sequence(self, params: dict, obs_seq: jnp.ndarray, prev_act_seq: jnp.ndarray, mask_seq: jnp.ndarray, dones_seq: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
-        """Calcul de la séquence complète pour BPTT via jax.lax.scan."""
-        if obs_seq.shape[1] == 0:
-            batch_size = obs_seq.shape[0]
-            return (jnp.zeros((batch_size, 0, self.act_dim), dtype=jnp.float32), 
-                    jnp.zeros((batch_size, 0), dtype=jnp.float32))
-                    
-        if obs_seq.shape[:2] != mask_seq.shape[:2]:
-            raise ValueError(f"Sequence shape mismatch: obs {obs_seq.shape[:2]} != mask {mask_seq.shape[:2]}")
-        if dones_seq.shape != obs_seq.shape[:2]:
-            raise ValueError(f"Sequence shape mismatch: dones {dones_seq.shape} != obs {obs_seq.shape[:2]}")
-            
-        batch_size, time_steps = obs_seq.shape[:2]
-        init_state = self.init_hidden_state(batch_size)
-        
-        # Patch: Vectorize sequence processing to avoid bottleneck
-        obs_flat = obs_seq.reshape((batch_size * time_steps, -1))
-        prev_act_flat = prev_act_seq.reshape((batch_size * time_steps,))
-        
-        encoded_flat = self.model.apply({'params': params}, obs_flat, prev_act_flat, method=self.model.encode)
-        encoded_seq = encoded_flat.reshape((batch_size, time_steps, -1))
-        
-        def scan_fn(carry, step_inputs):
-            h, c = carry
-            enc_t, mask_t, done_t = step_inputs
-            
-            # Patch: Explicit boolean/float handling via where
-            done_t_expanded = jnp.expand_dims(done_t, axis=-1)
-            h = jnp.where(done_t_expanded, 0.0, h)
-            c = jnp.where(done_t_expanded, 0.0, c)
-            carry = (h, c)
-            
-            new_carry, logits, value = self.model.apply({'params': params}, carry, enc_t, mask_t, method=self.model.apply_lstm)
-            
-            return new_carry, (logits, value[..., 0])
-
-        encoded_seq_t = jnp.swapaxes(encoded_seq, 0, 1)
-        mask_seq_t = jnp.swapaxes(mask_seq, 0, 1)
-        dones_seq_t = jnp.swapaxes(dones_seq, 0, 1)
-        
-        # Shift dones by 1 step (reset on step AFTER done)
-        dones_shifted = jnp.concatenate([jnp.zeros((1, batch_size), dtype=jnp.bool_), dones_seq_t[:-1]], axis=0)
-
-        _, (logits_seq_t, value_seq_t) = jax.lax.scan(scan_fn, init_state, (encoded_seq_t, mask_seq_t, dones_shifted))
-        
-        logits_seq = jnp.swapaxes(logits_seq_t, 0, 1)
-        value_seq = jnp.swapaxes(value_seq_t, 0, 1)
-        
-        return logits_seq, value_seq
-
-    def compute_loss(self, params: dict, obs: jnp.ndarray, action_masks: jnp.ndarray, actions: jnp.ndarray, 
+    def compute_loss(self, params: dict, hidden_state: tuple[jnp.ndarray, jnp.ndarray], obs: jnp.ndarray, prev_actions: jnp.ndarray, action_masks: jnp.ndarray, actions: jnp.ndarray, 
                     old_log_probs: jnp.ndarray, advantages: jnp.ndarray, returns: jnp.ndarray,
                     dones: jnp.ndarray,
                     clip_ratio: float = 0.2, value_coef: float = 1.0, entropy_coef: float = 0.01) -> tuple[jnp.ndarray, dict]:
@@ -138,12 +100,24 @@ class PPOAgent:
         
         actions = jnp.clip(actions, 0, self.act_dim - 1)
         
-        # Shift actions to get previous actions (using 0 for the first step)
-        batch_size = obs.shape[0]
-        first_step_actions = jnp.zeros((batch_size, 1), dtype=jnp.int32)
-        prev_actions_seq = jnp.concatenate([first_step_actions, actions[:, :-1]], axis=1)
+        batch_size, time_steps = obs.shape[0], obs.shape[1]
         
-        logits_seq, values_seq = self._forward_sequence(params, obs, prev_actions_seq, action_masks, dones)
+        # [PATCH] Protection contre les séquences vides
+        # Si la longueur de séquence est 0, on retourne une perte nulle.
+        # Cela utilise jax.lax.cond pour être compatible avec JIT si nécessaire, 
+        # mais on peut aussi juste utiliser une condition classique si time_steps est statique.
+        # Pour une compatibilité JIT stricte, il faut éviter un return conditionnel pur sur une dimension dynamique.
+        # Cependant, obs.shape est statique en JAX (sauf si on utilise jax.experimental.Dynamic).
+        # Ici on suppose que time_steps est fixe.
+        if time_steps == 0:
+            return jnp.array(0.0), {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0}
+        
+        dones = jnp.asarray(dones, dtype=jnp.float32)
+        # Shift dones by 1 step (reset on step AFTER done)
+        dones_shifted = jnp.concatenate([jnp.zeros((batch_size, 1), dtype=jnp.float32), dones[:, :-1]], axis=1)
+        
+        # Apply the model on the entire sequence directly
+        _, logits_seq, values_seq = self.model.apply({'params': params}, hidden_state, obs, prev_actions, action_masks, dones_shifted)
         
         log_probs_all = jax.nn.log_softmax(logits_seq, axis=-1)
         batch_idx = jnp.arange(obs.shape[0])[:, None]
@@ -168,6 +142,12 @@ class PPOAgent:
         
         total_loss = policy_loss + value_coef * value_loss - entropy_coef * entropy
         
+        is_nan = jnp.isnan(policy_loss) | jnp.isnan(value_loss) | jnp.isnan(entropy) | jnp.isnan(total_loss)
+        def fail_fast_on_nan(has_nan):
+            if has_nan:
+                raise ValueError("Fail Fast: NaN detected in loss calculation (Policy, Value, or Entropy)!")
+        jax.debug.callback(fail_fast_on_nan, is_nan)
+        
         metrics = {
             "policy_loss": policy_loss,
             "value_loss": value_loss,
@@ -176,12 +156,12 @@ class PPOAgent:
         
         return total_loss, metrics
 
-    def update_params(self, params: dict, opt_state: optax.OptState, obs: jnp.ndarray, action_masks: jnp.ndarray, actions: jnp.ndarray, 
+    def update_params(self, params: dict, opt_state: optax.OptState, hidden_state: tuple[jnp.ndarray, jnp.ndarray], obs: jnp.ndarray, prev_actions: jnp.ndarray, action_masks: jnp.ndarray, actions: jnp.ndarray, 
                     old_log_probs: jnp.ndarray, advantages: jnp.ndarray, returns: jnp.ndarray,
                     dones: jnp.ndarray) -> tuple[dict, optax.OptState, dict]:
         """Mise à jour BPTT des paramètres avec Optax."""
         loss_fn = jax.value_and_grad(self.compute_loss, has_aux=True)
-        (loss, metrics), grads = loss_fn(params, obs, action_masks, actions, old_log_probs, advantages, returns, dones)
+        (loss, metrics), grads = loss_fn(params, hidden_state, obs, prev_actions, action_masks, actions, old_log_probs, advantages, returns, dones)
         
         updates, new_opt_state = self.optimizer.update(grads, opt_state, params)
         new_params = optax.apply_updates(params, updates)

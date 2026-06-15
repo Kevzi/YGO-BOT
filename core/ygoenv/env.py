@@ -7,18 +7,21 @@ class YgoEnv(gym.Env):
     Environnement Gym standardisé encapsulant le moteur C++ (ocgcore) via YgoEngine.
     """
     
-    def __init__(self, omniscience=False):
+    def __init__(self, omniscience=False, max_steps=1000):
         super(YgoEnv, self).__init__()
-        self.omniscience = omniscience
-        
-        # Dimensions pour le MVP:
-        # Espace d'action: Par exemple, 200 actions discrètes possibles
-        self.action_space = gym.spaces.Discrete(200)
-        
-        # Espace d'observation: Un vecteur plat
-        self.observation_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(60694,), dtype=np.float32)
         
         self.engine = YgoEngine()
+        self.omniscience = omniscience
+        self.max_steps = max_steps
+        self.current_step = 0
+        
+        # 1. Observation Space
+        obs_dim = 156 * 389
+        self.observation_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(obs_dim,), dtype=np.float32)
+        
+        # 2. Action Space
+        self.action_space = gym.spaces.Discrete(250)
+        
         self._current_state = None
         self.max_turns = 100
         self.action_history = []
@@ -159,31 +162,32 @@ class YgoEnv(gym.Env):
         """
         Retourne un masque des actions légales depuis le moteur C++.
         """
+        if getattr(self, "_cached_mask", None) is not None:
+            return self._cached_mask
+            
         mask = np.zeros(self.action_space.n, dtype=np.bool_)
         
         if self._current_state is None:
             mask[0] = True
+            self._cached_mask = mask
             return mask
             
         actions = self.engine.get_legal_actions(self._current_state)
         self._current_state_actions = actions # Save for step translation
         
         for a in actions:
-            if a.get("msg") in ["MSG_SELECT_IDLECMD", "MSG_SELECT_BATTLECMD", "MSG_SELECT_CARD"]:
+            if a.get("msg") in ["MSG_SELECT_IDLECMD", "MSG_SELECT_BATTLECMD", "MSG_SELECT_CARD", "MSG_SELECT_CHAIN"]:
                 for choice in a.get("choices", []):
                     idx = choice.get("action_idx")
                     if idx is not None and 0 <= idx < self.action_space.n:
                         mask[idx] = True
-            else:
-                # fallback old behaviour
-                idx = a.get("action_type", 0)
-                if 0 <= idx < self.action_space.n:
-                    mask[idx] = True
+            # Only process known select messages; ignore others (WIN, auto-replies, etc.)
                 
         # Fallback de sécurité si l'engine ne retourne rien d'exploitable
         if not np.any(mask):
-            mask[0] = True
+            raise RuntimeError("EngineCrashError: Le moteur n'a renvoyé aucune action valide. Le parsing binaire s'est désynchronisé ou le duel a échoué (Mock désactivé).")
                 
+        self._cached_mask = mask        
         return mask
         
     def reset(self, seed=None, options=None) -> tuple[np.ndarray, dict]:
@@ -191,9 +195,10 @@ class YgoEnv(gym.Env):
         
         self.action_history = []
         self.step_count = 0
+        self._cached_mask = None
         
         # Détruire le duel précédent s'il existe
-        self.engine.destroy_duel()
+        self.close()
         
         # Initialiser un nouveau duel C++
         self._current_state = {"phase": "DRAW", "turn": 1}
@@ -203,30 +208,45 @@ class YgoEnv(gym.Env):
         if not duel_ok:
             raise RuntimeError("Impossible de créer un duel C++.")
         else:
-            # Charger un deck Beatdown pour les 2 joueurs
+            # Charger un deck aléatoire depuis data/decks/
             try:
-                from db.session import SessionLocal
-                from db.models import Card
-                with SessionLocal() as db:
-                    # Blue-Eyes White Dragon (89631139) et Gene-Warped Warwolf (03201284)
-                    beatdown_codes = [89631139, 3201284]
-                    cards = db.query(Card).filter(Card.id.in_(beatdown_codes)).all()
-                    codes = [c.id for c in cards]
-                    
-                    if len(codes) > 0:
-                        # Remplir le Deck avec ce qu'on a trouvé (mini deck de 10 cartes pour forcer la fin de partie)
-                        deck = (codes * 20)[:40]
-                        
-                        for player in (0, 1):
-                            for seq, code in enumerate(deck):
-                                self.engine.add_card(code, player, 0x01, seq, 0x8)
-                                
-                        self.engine.start_duel()
-                    else:
-                        raise ValueError("Les decks sont vides, impossible de démarrer le duel.")
-            except Exception as e:
-                raise RuntimeError(f"Erreur lors du chargement du deck: {e}")
+                import os
+                import random
+                from core.deck_parser import parse_deck_sync
                 
+                decks_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'decks'))
+                ydk_files = []
+                if os.path.exists(decks_dir):
+                    ydk_files = [os.path.join(decks_dir, f) for f in os.listdir(decks_dir) if f.endswith('.ydk')]
+                
+                for player in (0, 1):
+                    if ydk_files:
+                        chosen_deck_file = random.choice(ydk_files)
+                        with open(chosen_deck_file, 'r', encoding='utf-8') as f:
+                            parsed = parse_deck_sync(f.read())
+                        
+                        # Add main deck
+                        for seq, code in enumerate(parsed.get('main', [])):
+                            self.engine.add_card(code, player, 0x01, seq, 0x8)
+                            
+                        # Add extra deck
+                        for seq, code in enumerate(parsed.get('extra', [])):
+                            self.engine.add_card(code, player, 0x40, seq, 0x8) # 0x40 is Extra Deck
+                    else:
+                        # Fallback to beatdown
+                        beatdown_codes = [89631139, 3201284] * 20
+                        for seq, code in enumerate(beatdown_codes[:40]):
+                            self.engine.add_card(code, player, 0x01, seq, 0x8)
+                
+                # Activer omniscience (le RL agent peut voir les cartes cachées pour s'entraîner)
+                # Note: Omniscience is handled differently, removing set_player_info
+                
+                self.engine.start_duel()
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                raise RuntimeError(f"Erreur lors du chargement du deck: {e}")
+
         # Le state n'est pas None, il faut au moins un dict pour bypasser le if is None
         self._current_state = {"phase": "START", "turn": 1}
         
@@ -249,6 +269,7 @@ class YgoEnv(gym.Env):
             raise ValueError(f"Action invalide: {action}")
             
         self.action_history.append(action)
+        self._cached_mask = None
         
         reward = 0.0
         terminated = False

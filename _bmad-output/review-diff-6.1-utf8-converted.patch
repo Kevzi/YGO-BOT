@@ -1,0 +1,521 @@
+﻿diff --git a/ai/distributed.py b/ai/distributed.py
+index 7e7f367..b3a00fd 100644
+--- a/ai/distributed.py
++++ b/ai/distributed.py
+@@ -1,7 +1,11 @@
++import os
++os.environ["JAX_PLATFORMS"] = "cpu"  # Force CPU pour éviter les warnings CUDA
++
+ import ray
+ import numpy as np
+ import jax
+ import time
++import traceback
+ 
+ from core.ygoenv.env import YgoEnv
+ from ai.ppo import PPOAgent
+@@ -31,7 +35,7 @@ def compute_gae(rollout, gamma=0.99, lam=0.95):
+     returns = advantages + values
+     return advantages, returns
+ 
+-@ray.remote(num_gpus=1)
++@ray.remote
+ class Learner:
+     """
+     Acteur central qui récupère les trajectoires, met à jour le réseau PPO (JAX),
+@@ -76,13 +80,13 @@ class Learner:
+                 logging.warning("Batch d'observations vide (all_states est vide). Ignoré.")
+                 return
+ 
+-            obs_batch = np.concatenate(all_states, axis=0)
+-            mask_batch = np.concatenate(all_masks, axis=0).astype(bool)
+-            act_batch = np.concatenate(all_actions, axis=0)
+-            adv_batch = np.concatenate(all_adv, axis=0)
+-            ret_batch = np.concatenate(all_ret, axis=0)
+-            lp_batch = np.concatenate(all_lp, axis=0)
+-            dones_batch = np.concatenate(all_dones, axis=0)
++            obs_batch = np.stack(all_states, axis=0)
++            mask_batch = np.stack(all_masks, axis=0).astype(bool)
++            act_batch = np.stack(all_actions, axis=0)
++            adv_batch = np.stack(all_adv, axis=0)
++            ret_batch = np.stack(all_ret, axis=0)
++            lp_batch = np.stack(all_lp, axis=0)
++            dones_batch = np.stack(all_dones, axis=0)
+             
+             # Mettre à jour le réseau PPO
+             self.params, self.opt_state, metrics = self.agent.update_params(
+@@ -120,20 +124,33 @@ class RolloutWorker:
+     def start_collection_loop(self, rollout_steps=256, max_steps=10000):
+         """Boucle asynchrone de collecte de données."""
+         print(f"[Worker {self.worker_id}] Démarrage de la boucle de collecte...")
+-        obs, info = self.env.reset()
+-        
+-        while True:
+-            # 1. Récupérer les poids les plus récents ET d'un adversaire (bloquant)
+-            learner_params = ray.get(self.parameter_server.get_latest_params.remote())
+-            opponent_params = ray.get(self.parameter_server.get_match_params.remote())
+-            
+-            # 2. Collecter la trajectoire
+-            trajectory = self._collect_rollout(learner_params, opponent_params, obs, info, rollout_steps, max_steps)
+-            obs = trajectory["final_obs"]
+-            info = trajectory["final_info"]
+-            
+-            # 3. Pousser dans la file (bloque si la queue est pleine, évitant un OOM)
+-            self.queue.put(trajectory)
++        try:
++            print(f"[Worker {self.worker_id}] Appel de env.reset()...")
++            obs, info = self.env.reset()
++            print(f"[Worker {self.worker_id}] env.reset() terminé. obs.shape={obs.shape}")
++            
++            while True:
++                # 1. Récupérer les poids les plus récents ET d'un adversaire (bloquant)
++                learner_params = ray.get(self.parameter_server.get_latest_params.remote())
++                opponent_params = ray.get(self.parameter_server.get_match_params.remote())
++                
++                # 2. Collecter la trajectoire
++                trajectory = self._collect_rollout(learner_params, opponent_params, obs, info, rollout_steps, max_steps)
++                obs = trajectory["final_obs"]
++                info = trajectory["final_info"]
++                
++                print(f"[Worker {self.worker_id}] Rollout terminé, {len(trajectory['states'])} steps collectés. Push dans la queue...")
++                
++                # 3. Pousser dans la file (bloque si la queue est pleine, évitant un OOM)
++                self.queue.put(trajectory)
++        except Exception as e:
++            print(f"[Worker {self.worker_id}] ERREUR FATALE: {e}")
++            traceback.print_exc()
++            raise
++        finally:
++            print(f"[Worker {self.worker_id}] Arrêt de la boucle, fermeture de l'environnement.")
++            if hasattr(self.env, "close"):
++                self.env.close()
+ 
+     def _collect_rollout(self, params, opponent_params, initial_obs, initial_info, steps, max_steps):
+         """Méthode interne pour collecter un rollout (inspirée de train.py)."""
+@@ -142,15 +159,11 @@ class RolloutWorker:
+         hidden_state_learner = self.agent.init_hidden_state(1)
+         hidden_state_opponent = self.agent.init_hidden_state(1)
+         
+-        prev_action_learner = np.int32(0)
+-        prev_action_opponent = np.int32(0)
+-        
+         total_env_steps = 0
+         obs = initial_obs
+         info = initial_info
+         
+-        while len(states) < steps and total_env_steps < max_steps:
+-            total_env_steps += 1
++        while len(states) < steps:
+             mask = self.env.get_action_mask()
+             current_player = info.get("current_player", 0)
+             
+@@ -158,15 +171,13 @@ class RolloutWorker:
+                 current_params = params
+                 current_hidden = hidden_state_learner
+                 current_obs = obs
+-                current_prev_act = prev_action_learner
+             else:
+                 current_params = opponent_params
+                 current_hidden = hidden_state_opponent
+                 current_obs = self.env._get_observation(player=current_player)
+-                current_prev_act = prev_action_opponent
+                 
+             # 1. Évaluation brute via PPOAgent (pour stockage log_probs et values)
+-            probs, value, next_hidden = self.agent.forward(current_params, current_hidden, current_obs, current_prev_act, mask)
++            probs, value, next_hidden = self.agent.forward(current_params, current_hidden, current_obs, mask)
+             
+             if current_player == 0:
+                 hidden_state_learner = next_hidden
+@@ -183,24 +194,17 @@ class RolloutWorker:
+             if use_mcts:
+                 # 2. Amélioration de la politique via MCTS
+                 mcts = MCTS(self.agent.model, params=current_params, c_puct=1.25)
+-                root_node = mcts.search(self.env, current_obs, current_hidden, current_prev_act, num_simulations=4)
++                root_node = mcts.search(self.env, current_obs, current_hidden, num_simulations=4)
+                 action_probs = mcts.get_action_probs(root_node, temperature=1.0)
+             else:
+                 action_probs = masked_probs
+             
+             # Sélection de l'action selon la distribution
+             action = np.random.choice(len(action_probs), p=action_probs)
+-            
+-            if current_player == 0:
+-                prev_action_learner = np.int32(action)
+-            else:
+-                prev_action_opponent = np.int32(action)
+                 
+             next_obs, reward, terminated, truncated, info = self.env.step(action)
+             done = terminated or truncated
+             
+-            if done:
+-
+             if current_player == 0:
+                 states.append(obs)
+                 masks.append(mask)
+@@ -218,13 +222,11 @@ class RolloutWorker:
+                 obs, info = self.env.reset()
+                 hidden_state_learner = self.agent.init_hidden_state(1)
+                 hidden_state_opponent = self.agent.init_hidden_state(1)
+-                prev_action_learner = np.int32(0)
+-                prev_action_opponent = np.int32(0)
+                 
+         # Bootstrap
+         bootstrap_value = 0.0
+         if len(states) > 0 and not dones[-1]:
+-            _, b_value, _ = self.agent.forward(params, hidden_state_learner, obs, prev_action_learner, self.env.get_action_mask())
++            _, b_value, _ = self.agent.forward(params, hidden_state_learner, obs, self.env.get_action_mask())
+             bootstrap_value = float(b_value)
+                 
+         return {
+diff --git a/ai/network.py b/ai/network.py
+index daefde0..ae747e9 100644
+--- a/ai/network.py
++++ b/ai/network.py
+@@ -2,50 +2,70 @@ import jax
+ import jax.numpy as jnp
+ import flax.linen as nn
+ 
+-class ActorCriticLSTM(nn.Module):
++from typing import Tuple
++
++class MaskedLSTMCell(nn.Module):
+     """
+-    Réseau de neurones Actor-Critic avec LSTM pour PPO.
+-    Prend en charge l'observation de 60694 dimensions, compresse avec un encodeur,
+-    maintient un état de croyance (belief state) via un LSTM,
+-    et masque les actions illégales.
++    Cellule LSTM enveloppée pour gérer la réinitialisation de l'état caché (carry)
++    lorsqu'un épisode se termine (done_t == 1.0).
+     """
+-    act_dim: int = 200
+-    hidden_dim: int = 512
++    hidden_size: int
+ 
+     @nn.compact
+-    def __call__(self, carry: tuple[jnp.ndarray, jnp.ndarray], obs: jnp.ndarray, prev_action: jnp.ndarray, action_mask: jnp.ndarray) -> tuple[tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray, jnp.ndarray]:
+-        """
+-        Inférence sur un seul pas de temps (single step).
+-        """
+-        x = self.encode(obs, prev_action)
+-        return self.apply_lstm(carry, x, action_mask)
++    def __call__(self, carry: Tuple[jnp.ndarray, jnp.ndarray], inputs: Tuple[jnp.ndarray, jnp.ndarray]) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
++        x_t, done_t = inputs
++        c, h = carry
++        
++        # Masquage du carry précédent : si done_t == 1.0, le mask est 0.0, ce qui reset l'état.
++        mask = (1.0 - done_t)
++        if mask.ndim == 1:
++            mask = jnp.expand_dims(mask, axis=-1)
++            
++        carry = (c * mask, h * mask)
++        
++        # Appel propre à la cellule LSTM native de Flax
++        return nn.LSTMCell(features=self.hidden_size)(carry, x_t)
++
++class PPOActorCritic(nn.Module):
++    """
++    Réseau de neurones Actor-Critic avec LSTM pour PPO, utilisant nn.scan pour BPTT.
++    Prend en charge l'observation de 60694 dimensions, maintient un état de croyance
++    (belief state), et masque les actions illégales.
++    """
++    action_dim: int = 250
++    hidden_size: int = 512
+ 
+     @nn.compact
+-    def encode(self, obs: jnp.ndarray, prev_action: jnp.ndarray) -> jnp.ndarray:
+-        """Encode l'observation et l'action précédente."""
+-        x = nn.Dense(self.hidden_dim, name="encoder")(obs)
++    def __call__(self, carry: Tuple[jnp.ndarray, jnp.ndarray], obs_seq: jnp.ndarray, action_mask_seq: jnp.ndarray, dones_seq: jnp.ndarray) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray, jnp.ndarray]:
++        # obs_seq : forme (batch_size, time_steps, obs_dim)
++        
++        # 1. Feature Extractor (appliqué sur la séquence entière via vmap/broadcasting natif)
++        x = nn.Dense(1024, name="encoder")(obs_seq)
+         x = nn.relu(x)
+         
+-        prev_act_one_hot = jax.nn.one_hot(prev_action, self.act_dim, dtype=jnp.float32)
+-        act_emb = nn.Dense(self.hidden_dim, name="action_encoder")(prev_act_one_hot)
+-        act_emb = nn.relu(act_emb)
++        # 2. LSTM Cell déroulée dans le temps (BPTT)
++        scanned_lstm = nn.scan(
++            MaskedLSTMCell,
++            variable_broadcast="params",
++            split_rngs={"params": False},
++            in_axes=1,  # Itère sur l'axe du temps (index 1 de obs_seq et dones_seq)
++            out_axes=1  # Conserve la séquence temporelle en sortie
++        )(hidden_size=self.hidden_size, name="lstm")
+         
+-        return x + act_emb
+-
+-    @nn.compact
+-    def apply_lstm(self, carry: tuple[jnp.ndarray, jnp.ndarray], x: jnp.ndarray, action_mask: jnp.ndarray) -> tuple[tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray, jnp.ndarray]:
+-        """Applique la cellule LSTM et les têtes Actor/Critic."""
+-        lstm_cell = nn.LSTMCell(features=self.hidden_dim, name="lstm")
+-        new_carry, h_out = lstm_cell(carry, x)
++        # Application du LSTM (prend en entrée le carry précédent et le tuple de séquences)
++        new_carry, hidden_seq = scanned_lstm(carry, (x, dones_seq))
+         
+-        value = nn.Dense(1, name="critic")(h_out)
+-        logits = nn.Dense(self.act_dim, name="actor")(h_out)
++        # 3. Policy Head + Action Masking
++        logits = nn.Dense(self.action_dim, name="actor")(hidden_seq)
++        logits = jnp.where(action_mask_seq, logits, -1e9)
+         
+-        logits = jnp.where(action_mask, logits, -1e9)
++        # 4. Value Head (Critic)
++        value = nn.Dense(1, name="critic")(hidden_seq)
+         
+-        return new_carry, logits, value
++        return new_carry, logits, jnp.squeeze(value, axis=-1)
+ 
+-def init_hidden_state(batch_size: int, hidden_dim: int = 512) -> tuple[jnp.ndarray, jnp.ndarray]:
+-    """Initialise l'état caché (h, c) du LSTM pour un batch."""
+-    return (jnp.zeros((batch_size, hidden_dim), dtype=jnp.float32),
+-            jnp.zeros((batch_size, hidden_dim), dtype=jnp.float32))
++    @staticmethod
++    def initialize_carry(batch_size: int, hidden_size: int = 512) -> Tuple[jnp.ndarray, jnp.ndarray]:
++        """Initialise l'état caché (c, h) du LSTM pour un batch."""
++        return (jnp.zeros((batch_size, hidden_size), dtype=jnp.float32),
++                jnp.zeros((batch_size, hidden_size), dtype=jnp.float32))
+diff --git a/ai/ppo.py b/ai/ppo.py
+index dff7450..8a2a2f6 100644
+--- a/ai/ppo.py
++++ b/ai/ppo.py
+@@ -2,7 +2,7 @@ import jax
+ import jax.numpy as jnp
+ import optax
+ import math
+-from ai.network import ActorCriticLSTM, init_hidden_state
++from ai.network import PPOActorCritic
+ 
+ class PPOAgent:
+     def __init__(self, obs_dim: int, act_dim: int, hidden_dim: int = 512, learning_rate: float = 3e-4):
+@@ -13,7 +13,7 @@ class PPOAgent:
+         self.act_dim = act_dim
+         self.hidden_dim = hidden_dim
+         
+-        self.model = ActorCriticLSTM(act_dim=act_dim, hidden_dim=hidden_dim)
++        self.model = PPOActorCritic(action_dim=act_dim, hidden_size=hidden_dim)
+         # Patch: Missing gradient clipping
+         self.optimizer = optax.chain(
+             optax.clip_by_global_norm(1.0),
+@@ -22,106 +22,55 @@ class PPOAgent:
+         
+     def init_hidden_state(self, batch_size: int) -> tuple[jnp.ndarray, jnp.ndarray]:
+         """Initialise l'état caché (h, c) pour un batch."""
+-        return init_hidden_state(batch_size, self.hidden_dim)
++        return PPOActorCritic.initialize_carry(batch_size, self.hidden_dim)
+ 
+     def init_params(self, rng: jax.random.PRNGKey) -> tuple[dict, optax.OptState]:
+         """Initialise les poids du modèle Flax et l'état de l'optimiseur."""
+-        dummy_obs = jnp.zeros((1, self.obs_dim), dtype=jnp.float32)
+-        dummy_prev_action = jnp.zeros((1,), dtype=jnp.int32)
+-        dummy_mask = jnp.zeros((1, self.act_dim), dtype=jnp.bool_)
++        dummy_obs = jnp.zeros((1, 1, self.obs_dim), dtype=jnp.float32)
++        dummy_mask = jnp.zeros((1, 1, self.act_dim), dtype=jnp.bool_)
++        dummy_dones = jnp.zeros((1, 1), dtype=jnp.float32)
+         dummy_carry = self.init_hidden_state(1)
+         
+-        variables = self.model.init(rng, dummy_carry, dummy_obs, dummy_prev_action, dummy_mask)
++        variables = self.model.init(rng, dummy_carry, dummy_obs, dummy_mask, dummy_dones)
+         params = variables['params']
+         
+         opt_state = self.optimizer.init(params)
+         return params, opt_state
+ 
+-    def forward(self, params: dict, hidden_state: tuple[jnp.ndarray, jnp.ndarray], obs: jnp.ndarray, prev_action: jnp.ndarray, action_mask: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray, tuple[jnp.ndarray, jnp.ndarray]]:
++    def forward(self, params: dict, hidden_state: tuple[jnp.ndarray, jnp.ndarray], obs: jnp.ndarray, action_mask: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray, tuple[jnp.ndarray, jnp.ndarray]]:
+         """Forward pass public pour l'inférence. Retourne les probabilités, la Value et le nouvel état caché."""
+         if obs.ndim not in (1, 2):
+             raise ValueError(f"Invalid observation shape: {obs.shape}. Expected 1D or 2D array.")
+-        if obs.ndim != action_mask.ndim:
+-            raise ValueError(f"obs.ndim ({obs.ndim}) != action_mask.ndim ({action_mask.ndim})")
+-        if action_mask.shape[-1] != self.act_dim:
+-            raise ValueError(f"action_mask.shape[-1] ({action_mask.shape[-1]}) != {self.act_dim}")
+-        if obs.shape[-1] != self.obs_dim:
+-            raise ValueError(f"obs.shape[-1] ({obs.shape[-1]}) != {self.obs_dim}")
+-            
++        
+         action_mask = jnp.asarray(action_mask, dtype=jnp.bool_)
+         
+         is_single = obs.ndim == 1
+         if is_single:
+             obs = jnp.expand_dims(obs, axis=0)
+-            prev_action = jnp.expand_dims(prev_action, axis=0)
+             action_mask = jnp.expand_dims(action_mask, axis=0)
+             # Ensure hidden state has batch dimension
+             h, c = hidden_state
+             if h.ndim == 1:
+                 hidden_state = (jnp.expand_dims(h, axis=0), jnp.expand_dims(c, axis=0))
+-            
+-        if obs.shape[0] != action_mask.shape[0]:
+-            raise ValueError(f"Batch size mismatch: obs {obs.shape[0]} != action_mask {action_mask.shape[0]}")
+-            
++                
+         action_mask = jnp.where(~jnp.any(action_mask, axis=-1, keepdims=True), True, action_mask)
+         
+-        next_hidden_state, logits, value = self.model.apply({'params': params}, hidden_state, obs, prev_action, action_mask)
+-        
+-        probs = jax.nn.softmax(logits, axis=-1)
+-        
+-        if is_single:
+-            return probs[0], value[0, 0], (next_hidden_state[0][0], next_hidden_state[1][0])
+-        return probs, value[..., 0], next_hidden_state
+-
+-    def _forward_sequence(self, params: dict, obs_seq: jnp.ndarray, prev_act_seq: jnp.ndarray, mask_seq: jnp.ndarray, dones_seq: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+-        """Calcul de la séquence complète pour BPTT via jax.lax.scan."""
+-        if obs_seq.shape[1] == 0:
+-            batch_size = obs_seq.shape[0]
+-            return (jnp.zeros((batch_size, 0, self.act_dim), dtype=jnp.float32), 
+-                    jnp.zeros((batch_size, 0), dtype=jnp.float32))
+-                    
+-        if obs_seq.shape[:2] != mask_seq.shape[:2]:
+-            raise ValueError(f"Sequence shape mismatch: obs {obs_seq.shape[:2]} != mask {mask_seq.shape[:2]}")
+-        if dones_seq.shape != obs_seq.shape[:2]:
+-            raise ValueError(f"Sequence shape mismatch: dones {dones_seq.shape} != obs {obs_seq.shape[:2]}")
+-            
+-        batch_size, time_steps = obs_seq.shape[:2]
+-        init_state = self.init_hidden_state(batch_size)
++        # Add time dimension for PPOActorCritic sequence requirement
++        obs_seq = jnp.expand_dims(obs, axis=1)
++        action_mask_seq = jnp.expand_dims(action_mask, axis=1)
++        dones_seq = jnp.zeros((obs.shape[0], 1), dtype=jnp.float32)
+         
+-        # Patch: Vectorize sequence processing to avoid bottleneck
+-        obs_flat = obs_seq.reshape((batch_size * time_steps, -1))
+-        prev_act_flat = prev_act_seq.reshape((batch_size * time_steps,))
+-        
+-        encoded_flat = self.model.apply({'params': params}, obs_flat, prev_act_flat, method=self.model.encode)
+-        encoded_seq = encoded_flat.reshape((batch_size, time_steps, -1))
+-        
+-        def scan_fn(carry, step_inputs):
+-            h, c = carry
+-            enc_t, mask_t, done_t = step_inputs
+-            
+-            # Patch: Explicit boolean/float handling via where
+-            done_t_expanded = jnp.expand_dims(done_t, axis=-1)
+-            h = jnp.where(done_t_expanded, 0.0, h)
+-            c = jnp.where(done_t_expanded, 0.0, c)
+-            carry = (h, c)
+-            
+-            new_carry, logits, value = self.model.apply({'params': params}, carry, enc_t, mask_t, method=self.model.apply_lstm)
+-            
+-            return new_carry, (logits, value[..., 0])
+-
+-        encoded_seq_t = jnp.swapaxes(encoded_seq, 0, 1)
+-        mask_seq_t = jnp.swapaxes(mask_seq, 0, 1)
+-        dones_seq_t = jnp.swapaxes(dones_seq, 0, 1)
++        next_hidden_state, logits_seq, value_seq = self.model.apply({'params': params}, hidden_state, obs_seq, action_mask_seq, dones_seq)
+         
+-        # Shift dones by 1 step (reset on step AFTER done)
+-        dones_shifted = jnp.concatenate([jnp.zeros((1, batch_size), dtype=jnp.bool_), dones_seq_t[:-1]], axis=0)
+-
+-        _, (logits_seq_t, value_seq_t) = jax.lax.scan(scan_fn, init_state, (encoded_seq_t, mask_seq_t, dones_shifted))
++        # Remove time dimension
++        logits = logits_seq[:, 0, :]
++        value = value_seq[:, 0]
+         
+-        logits_seq = jnp.swapaxes(logits_seq_t, 0, 1)
+-        value_seq = jnp.swapaxes(value_seq_t, 0, 1)
++        probs = jax.nn.softmax(logits, axis=-1)
+         
+-        return logits_seq, value_seq
++        if is_single:
++            return probs[0], value[0], (next_hidden_state[0][0], next_hidden_state[1][0])
++        return probs, value, next_hidden_state
+ 
+     def compute_loss(self, params: dict, obs: jnp.ndarray, action_masks: jnp.ndarray, actions: jnp.ndarray, 
+                     old_log_probs: jnp.ndarray, advantages: jnp.ndarray, returns: jnp.ndarray,
+@@ -138,12 +87,15 @@ class PPOAgent:
+         
+         actions = jnp.clip(actions, 0, self.act_dim - 1)
+         
+-        # Shift actions to get previous actions (using 0 for the first step)
+-        batch_size = obs.shape[0]
+-        first_step_actions = jnp.zeros((batch_size, 1), dtype=jnp.int32)
+-        prev_actions_seq = jnp.concatenate([first_step_actions, actions[:, :-1]], axis=1)
++        batch_size, time_steps = obs.shape[:2]
++        init_state = self.init_hidden_state(batch_size)
++        
++        dones = jnp.asarray(dones, dtype=jnp.float32)
++        # Shift dones by 1 step (reset on step AFTER done)
++        dones_shifted = jnp.concatenate([jnp.zeros((batch_size, 1), dtype=jnp.float32), dones[:, :-1]], axis=1)
+         
+-        logits_seq, values_seq = self._forward_sequence(params, obs, prev_actions_seq, action_masks, dones)
++        # Apply the model on the entire sequence directly
++        _, logits_seq, values_seq = self.model.apply({'params': params}, init_state, obs, action_masks, dones_shifted)
+         
+         log_probs_all = jax.nn.log_softmax(logits_seq, axis=-1)
+         batch_idx = jnp.arange(obs.shape[0])[:, None]
+@@ -168,6 +120,12 @@ class PPOAgent:
+         
+         total_loss = policy_loss + value_coef * value_loss - entropy_coef * entropy
+         
++        is_nan = jnp.isnan(policy_loss) | jnp.isnan(value_loss) | jnp.isnan(entropy) | jnp.isnan(total_loss)
++        def fail_fast_on_nan(has_nan):
++            if has_nan:
++                raise ValueError("Fail Fast: NaN detected in loss calculation (Policy, Value, or Entropy)!")
++        jax.debug.callback(fail_fast_on_nan, is_nan)
++        
+         metrics = {
+             "policy_loss": policy_loss,
+             "value_loss": value_loss,
+diff --git a/test_jit_lstm.py b/test_jit_lstm.py
+new file mode 100644
+index 0000000..2a7b8d4
+--- /dev/null
++++ b/test_jit_lstm.py
+@@ -0,0 +1,54 @@
++import jax
++import jax.numpy as jnp
++from ai.ppo import PPOAgent
++
++def test_lstm_compilation():
++    print("Testing LSTM Initialization and Forward Pass compilation...")
++    obs_dim = 60694
++    act_dim = 250
++    hidden_dim = 512
++    batch_size = 4
++    time_steps = 10
++    
++    agent = PPOAgent(obs_dim=obs_dim, act_dim=act_dim, hidden_dim=hidden_dim)
++    
++    rng = jax.random.PRNGKey(42)
++    params, opt_state = agent.init_params(rng)
++    
++    # Test single step forward pass
++    obs_single = jnp.zeros((batch_size, obs_dim), dtype=jnp.float32)
++    action_mask_single = jnp.ones((batch_size, act_dim), dtype=jnp.bool_)
++    hidden_state = agent.init_hidden_state(batch_size)
++    
++    # Compile single step
++    print("Compiling single step forward...")
++    forward_jit = jax.jit(agent.forward)
++    probs, value, next_hidden = forward_jit(params, hidden_state, obs_single, action_mask_single)
++    
++    print(f"Forward pass completed. Probs shape: {probs.shape}, Value shape: {value.shape}, Next hidden H shape: {next_hidden[0].shape}")
++    
++    # Test sequence compute_loss
++    print("Compiling sequence compute_loss (BPTT)...")
++    obs_seq = jnp.zeros((batch_size, time_steps, obs_dim), dtype=jnp.float32)
++    action_mask_seq = jnp.ones((batch_size, time_steps, act_dim), dtype=jnp.bool_)
++    actions_seq = jnp.zeros((batch_size, time_steps), dtype=jnp.int32)
++    old_log_probs = jnp.zeros((batch_size, time_steps), dtype=jnp.float32)
++    advantages = jnp.zeros((batch_size, time_steps), dtype=jnp.float32)
++    returns = jnp.zeros((batch_size, time_steps), dtype=jnp.float32)
++    dones = jnp.zeros((batch_size, time_steps), dtype=jnp.float32)
++    
++    # Set a mock done in the middle to see if shape is fine
++    dones = dones.at[:, 5].set(1.0)
++    
++    update_jit = jax.jit(agent.update_params)
++    
++    new_params, new_opt_state, metrics = update_jit(
++        params, opt_state, obs_seq, action_mask_seq, actions_seq, 
++        old_log_probs, advantages, returns, dones
++    )
++    
++    print(f"Update completed. Metrics: loss={metrics['total_loss']}, policy_loss={metrics['policy_loss']}, entropy={metrics['entropy']}")
++    print("All JIT compilations passed successfully!")
++
++if __name__ == "__main__":
++    test_lstm_compilation()

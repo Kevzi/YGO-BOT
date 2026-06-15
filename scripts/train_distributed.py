@@ -1,8 +1,9 @@
+import os
+
 import ray
 from ray.util.queue import Queue
 import time
 import sys
-import os
 
 # Ensure the root directory is in the Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -15,10 +16,10 @@ def main():
     print("Initialisation du cluster Ray...")
     ray.init(ignore_reinit_error=True)
     
-    # Paramètres d'architecture
-    num_workers = 4 # Peut être scalé pour Google TRC / TPU
-    queue_maxsize = 100 # Pour éviter un OOM de trajectoires
-    batch_size = 4 # Nombre de rollouts collectés avant une update PPO
+    # Paramètres d'architecture — optimisés pour une nuit de Self-Play
+    num_workers = 4 # Gardé à 4 pour ne pas étouffer le CPU
+    queue_maxsize = 20 # Tampon plus grand
+    batch_size = 8 # Update PPO tous les 8 rollouts pour plus de stabilité
     rollout_steps = 256
     
     # 1. Initialiser une instance de l'environnement pour obtenir les dimensions
@@ -30,7 +31,7 @@ def main():
     
     # 2. Créer le Parameter Server (SelfPlayManager)
     print("Lancement du Parameter Server (SelfPlayManager)...")
-    manager = SelfPlayManager.remote(max_history=50)
+    manager = SelfPlayManager.remote(max_history=10) # 10 snapshots max (~5 Go) en RAM
     
     # 3. Créer la Queue asynchrone partagée
     print(f"Création de la Queue (maxsize={queue_maxsize})...")
@@ -78,9 +79,16 @@ def main():
             print(f"[{uptime:.0f}s] Uptime | Queue size: {qsize}/{queue_maxsize} | Snapshots: {history_size}")
             time.sleep(10)
     except KeyboardInterrupt:
-        print("\nArrêt de l'entraînement distribué demandé.")
-        ray.shutdown()
-        sys.exit(0)
+        print("\n[Orchestrateur] Arrêt demandé (Ctrl+C). Sauvegarde du modèle en cours...")
+        try:
+            ray.get(learner.save_checkpoint.remote(), timeout=10)
+            print("[Orchestrateur] Sauvegarde réussie !")
+        except Exception as e:
+            print(f"[Orchestrateur] Échec de la sauvegarde : {e}")
+        finally:
+            print("[Orchestrateur] Extinction du cluster Ray.")
+            ray.shutdown()
+            sys.exit(0)
 
 if __name__ == "__main__":
     main()

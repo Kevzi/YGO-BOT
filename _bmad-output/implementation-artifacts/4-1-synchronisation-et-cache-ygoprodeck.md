@@ -2,8 +2,7 @@
 epic: 4
 story: 1
 title: "Synchronisation et Cache YGOPRODeck"
-status: done
-baseline_commit: 28324257d377740e7731aca336064ad73d2f9737
+status: ready-for-dev
 ---
 
 # Story 4.1: Synchronisation et Cache YGOPRODeck
@@ -27,59 +26,54 @@ so that je puisse télécharger, mettre à jour, et cacher localement (dans SQLi
 
 ## Tasks / Subtasks
 
-- [x] Task 1: Ajouter un client HTTP asynchrone (ex: `httpx` ou `requests`) via Poetry
-- [x] Task 2: Définir le modèle SQLAlchemy `Card` (ou `CardMetadata`)
-  - [x] Subtask 2.1: Créer le modèle dans `db/models.py` avec les champs utiles (id/passcode, name, type, desc, race, archetype, etc.)
-  - [x] Subtask 2.2: Générer la migration Alembic correspondante et l'appliquer (`alembic upgrade head`)
-- [x] Task 3: Créer le script de synchronisation YGOPRODeck
-  - [x] Subtask 3.1: Implémenter le téléchargement depuis `https://db.ygoprodeck.com/api/v7/cardinfo.php`
-  - [x] Subtask 3.2: Implémenter l'insertion/mise à jour (upsert) en base SQLite via SQLAlchemy
-  - [x] Subtask 3.3: Gérer le rate-limit et les erreurs HTTP potentielles (Fail Fast si l'API est HS)
-- [x] Task 4: Tests automatisés
-  - [x] Subtask 4.1: Ajouter un test mockant l'API YGOPRODeck pour vérifier le parsing et l'insertion SQLite sans faire d'appels réseau réels
+- [ ] Task 1: Création du modèle de base de données SQLite
+  - [ ] Subtask 1.1: Définir le modèle Pydantic/SQLAlchemy pour les cartes.
+  - [ ] Subtask 1.2: Ajouter la migration Alembic associée.
+- [ ] Task 2: Intégration API YGOPRODeck
+  - [ ] Subtask 2.1: Implémenter le client HTTP (ex: httpx) avec gestion stricte du rate limit (max 20 requêtes/s).
+  - [ ] Subtask 2.2: Gérer le téléchargement des métadonnées (passcode, name, text, properties).
+- [ ] Task 3: Ingestion et Mise en Cache
+  - [ ] Subtask 3.1: Sauvegarder les données récupérées en base SQLite.
+  - [ ] Subtask 3.2: Implémenter la logique d'upsert (mise à jour si existant, création sinon).
+- [ ] Task 4: Gestion des erreurs
+  - [ ] Subtask 4.1: Implémenter le pattern "Fail Fast" en cas de panne réseau sans retry silencieux.
 
 ## Dev Notes
 
-- **Dependencies**: La stack technique requiert l'ajout d'une librairie HTTP (ex: `poetry add httpx` ou `requests`).
-- **Database Rules**: Respecter la convention de nommage de l'architecture : tables SQL au pluriel en `snake_case` (ex: `cards`), colonnes en `snake_case`. Utiliser SQLite (déjà en place).
-- **Rate-Limiting**: Le point de terminaison de l'API renvoie généralement toutes les données d'un coup, mais si des appels multiples sont faits (ex: images ou lots), la limite stricte de 20 req/sec doit être codée pour éviter les bans.
-- **Architecture**: L'API FastAPI (`api/`) ou l'environnement RL (`core/ygoenv/`) consulteront ensuite cette base locale au lieu d'appeler YGOPRODeck en direct, conformément au critère d'acceptation "source de vérité exclusive".
-- **Code Naming**: Les fonctions et variables Python doivent être en `snake_case`.
+### Technical Requirements
+- Language/Framework: Python (FastAPI/Scripts).
+- Database: SQLite avec requêtes Alembic pour la migration.
+- Error Handling: "Fail Fast", utiliser l'approche définie dans l'architecture où toute défaillance retourne une erreur formelle sans retry.
+- Rate Limiting: 20 req/s strict maximum pour YGOPRODeck.
 
-### Project Structure Notes
+### Architecture Compliance
+- Code style: Naming patterns en camelCase pour l'API REST JSON (via Pydantic `alias_generator = to_camel`) et snake_case pour le code Python interne et les tables SQLite.
+- Database: Respecter l'utilisation de SQLAlchemy + Alembic existante.
+- Éviter d'utiliser `sys.exit(1)` dans les fonctions internes, lever des exceptions appropriées à la place.
 
-- Créer un script comme `scripts/sync_ygoprodeck.py` ou un module dans un nouveau package `data/` selon les préférences.
-- Les tests devront aller dans `tests/` en suivant la même arborescence.
+### File Structure Requirements
+- Le modèle de base de données doit être dans les fichiers de modèles (`db/models.py`).
+- Le script de synchronisation doit être dans le dossier scripts ou un module dédié (ex: `data/sync.py`).
+
+### Testing Requirements
+- Mocker l'API HTTP YGOPRODeck lors des tests (utiliser pytest-httpx ou équivalent).
+- Les tests ne doivent pas modifier la base de données de production. Utiliser une base de données en mémoire (ou isolée) via pytest fixtures.
+
+### Previous Story Intelligence
+- Les migrations Alembic doivent ajouter aux existantes, ne pas écraser l'historique de l'Epic 1.
 
 ### References
-
-- [Source: _bmad-output/planning-artifacts/epics.md#Story 4.1]
-- [Source: _bmad-output/planning-artifacts/architecture.md#Naming Patterns]
-
-### Review Findings
-- [ ] [Review][Patch] Destructive Alembic Migration History (rewrote history instead of appending) [alembic/versions]
-- [ ] [Review][Patch] Missing Test Dependency (pytest-httpx missing in pyproject.toml) [pyproject.toml]
-- [ ] [Review][Patch] Database Pollution in Tests (uses live DB) [tests/scripts/test_sync_ygoprodeck.py]
-- [ ] [Review][Patch] Missing Critical Game Attributes (scale, linkval) [db/models.py]
-- [ ] [Review][Patch] Dangerous Process Termination (sys.exit in async function) [scripts/sync_ygoprodeck.py]
-- [ ] [Review][Patch] KeyError risk on missing API keys [scripts/sync_ygoprodeck.py]
-- [ ] [Review][Patch] Uncaught SQLAlchemyError [scripts/sync_ygoprodeck.py]
-- [ ] [Review][Patch] Insufficient Column Sizing Risk (desc should be Text) [db/models.py]
-- [ ] [Review][Patch] Reckless Path Manipulation (sys.path.insert) [scripts/sync_ygoprodeck.py]
-- [ ] [Review][Patch] Shadowing Built-in Types (type column name) [db/models.py]
-- [ ] [Review][Patch] Naive Rate-Limiting Implementation [scripts/sync_ygoprodeck.py]
-- [x] [Review][Defer] Hard SQLite Dialect Lock-in (architecture specifies SQLite for now) [scripts/sync_ygoprodeck.py] — deferred, pre-existing
-- [x] [Review][Defer] Missing Indexing Strategy (atk, def, etc.) [db/models.py] — deferred, pre-existing
+- [Source: _bmad-output/planning-artifacts/epics.md#Epic 4: Intelligence du Metagame (Connaissance externe)]
+- [Source: _bmad-output/planning-artifacts/architecture.md]
 
 ## Dev Agent Record
 
 ### Agent Model Used
-
 Antigravity
 
 ### Debug Log References
 
 ### Completion Notes List
+- Ultimate context engine analysis completed - comprehensive developer guide created for 4-1.
 
 ### File List
-

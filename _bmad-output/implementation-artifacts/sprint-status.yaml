@@ -49,9 +49,9 @@ development_status:
   3-3-chargeur-dembeddings-vectoriels-in-memory: done
   3-4-semantique-zero-shot: done
   epic-3-retrospective: optional
-  epic-4: done
-  4-1-synchronisation-et-cache-ygoprodeck: done
-  4-2-interoperabilite-du-parseur-de-decks: done
+  epic-4: in-progress
+  4-1-synchronisation-et-cache-ygoprodeck: ready-for-dev
+  4-2-interoperabilite-du-parseur-de-decks: ready-for-dev
   epic-4-retrospective: optional
   epic-5: done
   5-1-espace-d-actions-discretise-200-actions-statiques: done
@@ -65,3 +65,9 @@ development_status:
   6-3-boucle-apprentissage-asynchrone: done
   6-4-distribution-massive-et-league-training-via-ray: done
   epic-6-retrospective: optional
+  epic-7: in-progress
+  7-1-parseur-et-ingestion-de-replays: review
+  7-2-creation-du-dataset-offline: backlog
+  7-3-entrainement-supervise-behavioral-cloning: backlog
+  7-4-injection-dans-le-league-training: backlog
+  epic-7-retrospective: optional

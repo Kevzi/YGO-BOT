@@ -57,6 +57,7 @@ FR-1.1: Epic 3 - Compréhension sémantique
 FR-1.2: Epic 2 - Apprentissage PPO
 FR-1.3: Epic 3 - Mémoire et Bluff (LSTM)
 FR-1.4: Epic 3 - Planification (MCTS)
+FR-1.5: Epic 7 - Apprentissage par Imitation
 FR-2.1: Epic 1 - Séparation logique (Moteur C++)
 FR-2.2: Epic 2 - Environnement Gym
 FR-3.1: Epic 1 - API d'Inférence
@@ -90,6 +91,10 @@ Refonte et optimisation de l'environnement Gym (ygoenv) pour permettre à l'agen
 ### Epic 6: Intelligence Artificielle et Planification (Deep RL)
 Connecter l'environnement à un modèle JAX complet capable d'apprendre par lui-même (Self-Play) en respectant les actions légales, en retenant l'information cachée via LSTM, en planifiant avec MCTS et en s'entraînant massivement via Ray.
 **FRs covered:** FR-6.1, FR-6.2, FR-6.3, FR-6.4
+
+### Epic 7: Apprentissage par Imitation (Behavioral Cloning) et Exploitation des Replays
+Exploiter les fichiers replays (.yrp) existants pour pré-entraîner le réseau PPO (Behavioral Cloning), permettant d'accélérer l'acquisition des stratégies de base avant de basculer en Self-Play.
+**FRs covered:** FR-1.5
 
 ## Epic 1: La Fondation du Sparring-Partner (Jouable en local)
 
@@ -180,8 +185,8 @@ So that l'agent puisse mettre à jour sa politique en fonction des récompenses 
 ### Story 2.3: Pipeline d'Entraînement Distribué (Ray)
 
 As a Chercheur,
-I want d'orchestrer l'entraînement en parallèle sur plusieurs threads/machines via la librairie Ray,
-So that je puisse simuler massivement des milliers de parties simultanément et accélérer de façon exponentielle la vitesse d'apprentissage (League Training).
+I want de vérifier l'implémentation de la boucle d'entraînement via Ray avec plusieurs acteurs asynchrones (RolloutWorkers et Learner),
+So that je puisse maximiser l'utilisation du cluster et la collecte d'expérience pour PPO.
 
 **Acceptance Criteria:**
 
@@ -417,3 +422,30 @@ So that l'apprentissage puisse passer à l'échelle sur des clusters multi-GPU e
 **Then** Ray orchestre la distribution des calculs, équilibrant la charge des différents acteurs MCTS et du Learner central
 **And** le League Training gère dynamiquement plusieurs pools de versions d'agents (decks méta, historiques, etc.) sans goulot d'étranglement mémoire.
 
+## Epic 7: Apprentissage par Imitation (Behavioral Cloning) et Exploitation des Replays
+
+Exploiter les fichiers replays (.yrp) existants pour pré-entraîner le réseau PPO (Behavioral Cloning), permettant d'accélérer l'acquisition des stratégies de base avant de basculer en Self-Play.
+
+### Story 7.1: Parseur et Ingestion de Replays (.yrp)
+
+As a Développeur / Data Engineer,
+I want lire les fichiers de replay .yrp et les faire rejouer de manière silencieuse par le moteur C++ (ocgcore / ygoenv),
+So that je puisse extraire l'état (observation) et l'action jouée à chaque étape pour les insérer dans la table SQLite game_transitions.
+
+### Story 7.2: Création du Dataset Offline (JAX/Flax)
+
+As a Chercheur,
+I want construire un DataLoader capable de récupérer massivement ces transitions depuis SQLite et de les convertir en batchs de tenseurs (obs, action, action_mask) parfaitement formatés pour JAX,
+So that l'entraînement supervisé puisse être nourri efficacement sans goulot d'étranglement I/O.
+
+### Story 7.3: Entraînement Supervisé (Behavioral Cloning)
+
+As a Chercheur,
+I want créer un script (scripts/train_imitation.py) et ajouter une fonction de perte (Cross-Entropy) au PPOActorCritic,
+So that le réseau apprenne à maximiser la probabilité de prédire l'action du joueur humain du replay, servant de pre-training.
+
+### Story 7.4: Injection dans le League Training
+
+As a Chercheur,
+I want utiliser les snapshots générés par l'apprentissage supervisé comme modèles de départ dans le cluster Ray,
+So that le Self-Play (League Training) démarre avec un niveau de jeu déjà compétent au lieu de commencer avec une politique aléatoire (Cold Start).

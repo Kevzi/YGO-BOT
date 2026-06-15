@@ -9,6 +9,7 @@ def setup_cors(app: FastAPI):
             "http://localhost:3000",
             "http://localhost:8080",
             "http://127.0.0.1",
+            "https://neos.moecube.com",
         ],
         allow_credentials=True,
         allow_methods=["*"],

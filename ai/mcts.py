@@ -43,26 +43,27 @@ class MCTS:
         self.actor_critic = actor_critic
         self.params = params
         self.c_puct = c_puct
-        self.act_dim = actor_critic.act_dim
+        self.action_dim = actor_critic.action_dim
 
     def evaluate_state(self, carry, obs, prev_action, action_mask, apply_gumbel=False):
         """
         Évalue un état avec le réseau ActorCriticLSTM.
         Si apply_gumbel est True, ajoute du bruit de Gumbel aux logits pour l'exploration.
         """
-        obs_jnp = jnp.expand_dims(jnp.array(obs, dtype=jnp.float32), 0)
-        prev_action_jnp = jnp.expand_dims(jnp.array(prev_action, dtype=jnp.int32), 0)
-        action_mask_jnp = jnp.expand_dims(jnp.array(action_mask, dtype=jnp.bool_), 0)
+        obs_jnp = jnp.expand_dims(jnp.expand_dims(jnp.array(obs, dtype=jnp.float32), 0), 0)
+        prev_action_jnp = jnp.expand_dims(jnp.expand_dims(jnp.array(prev_action, dtype=jnp.int32), 0), 0)
+        action_mask_jnp = jnp.expand_dims(jnp.expand_dims(jnp.array(action_mask, dtype=jnp.bool_), 0), 0)
+        dones_jnp = jnp.zeros((1, 1), dtype=jnp.bool_)
         
         new_carry, logits, value = self.actor_critic.apply(
-            {'params': self.params}, carry, obs_jnp, prev_action_jnp, action_mask_jnp
+            {'params': self.params}, carry, obs_jnp, prev_action_jnp, action_mask_jnp, dones_jnp
         )
         
         value = float(value[0, 0])
-        logits = np.array(logits[0])
+        logits = np.array(logits[0, 0])
         
         # Masquer les actions illégales
-        mask_val = np.finfo(np.float32).min
+        mask_val = -1e9
         valid_logits = np.where(action_mask, logits, mask_val)
         
         if apply_gumbel:
@@ -145,7 +146,7 @@ class MCTS:
                     
                 # Appliquer l'action trouvée lors de la sélection
                 step_obs, step_reward, terminated, truncated, _ = sim_env.step(action_taken)
-                new_mask = sim_env.get_legal_actions()
+                new_mask = sim_env.get_action_mask() if hasattr(sim_env, 'get_action_mask') else sim_env.get_legal_actions()
                 
                 new_carry, probs, value = self.evaluate_state(
                     node.carry_state, step_obs, action_taken, new_mask, apply_gumbel=False
@@ -170,11 +171,14 @@ class MCTS:
 
     def get_action_probs(self, root_node: MCTSNode, temperature=1.0) -> np.ndarray:
         """Calcule les probabilités d'action finales basées sur les visites MCTS."""
-        action_visits = np.zeros(self.act_dim, dtype=np.float32)
+        action_visits = np.zeros(self.action_dim, dtype=np.float32)
         for action, child in root_node.children.items():
             action_visits[action] = child.N
             
         if temperature == 0:
+            if np.sum(action_visits) == 0:
+                probs = root_node.action_mask / max(np.sum(root_node.action_mask), 1e-8)
+                return probs
             best_action = np.argmax(action_visits)
             probs = np.zeros_like(action_visits)
             probs[best_action] = 1.0

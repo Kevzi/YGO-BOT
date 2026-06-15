@@ -8,7 +8,7 @@ from pathlib import Path
 
 CORE_DIR = Path(__file__).parent.resolve()
 LUA_DIR = CORE_DIR / "lua"
-OCGCORE_DIR = CORE_DIR / "ocgcore"
+OCGCORE_DIR = CORE_DIR / "ocgcore_src"
 BUILD_DIR = CORE_DIR / "build"
 
 LUA_VERSION = "5.3.6"
@@ -52,10 +52,10 @@ add_library(lua STATIC ${LUA_SRC})
 def setup_master_cmake():
     cmake_content = """cmake_minimum_required(VERSION 3.10)
 project(ygoenv CXX C)
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
 
 add_subdirectory(lua)
-add_subdirectory(ocgcore)
+add_subdirectory(ocgcore_src ocgcore)
 """
     with open(CORE_DIR / "CMakeLists.txt", "w", encoding="utf-8") as f:
         f.write(cmake_content)
@@ -68,6 +68,7 @@ file(GLOB SRC "*.cpp")
 add_library(ocgcore SHARED ${SRC})
 target_include_directories(ocgcore PRIVATE ../lua)
 target_link_libraries(ocgcore lua)
+target_compile_definitions(ocgcore PRIVATE OCGCORE_EXPORT_FUNCTIONS)
 """
     with open(cmake_path, "w", encoding="utf-8") as f:
         f.write(content)

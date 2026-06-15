@@ -1,4 +1,5 @@
 import os
+import struct
 import ctypes
 from pathlib import Path
 from typing import Any, Dict, List
@@ -197,61 +198,66 @@ class YgoEngine:
     def _load_library(self):
         """Charge ocgcore via ctypes."""
         import sys
-        core_dir = Path(__file__).parent
+        import platform
+        import os
+        from pathlib import Path
         
-        if sys.platform.startswith("win"):
-            dll_path = core_dir / "ocgcore.dll"
-        elif sys.platform.startswith("darwin"):
-            dll_path = core_dir / "libocgcore.dylib"
+        system = platform.system()
+        base_dir = Path(__file__).parent.parent
+        
+        if system == "Windows":
+            dll_path = base_dir / "ocgcore.dll"
+        elif system == "Linux":
+            dll_path = base_dir / "libocgcore.so"
         else:
-            dll_path = core_dir / "libocgcore.so"
+            dll_path = base_dir / "libocgcore.dylib"
             
-        if dll_path.is_file():
-            try:
-                # Load DLL
-                self.lib = ctypes.CDLL(str(dll_path))
-                
-                global _engine_lib
-                _engine_lib = self.lib
-                
-                # Bind C functions for ocgcore-KCG
-                self.lib.OCG_CreateDuel.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(OCG_DuelOptions)]
-                self.lib.OCG_CreateDuel.restype = ctypes.c_int
-                
-                self.lib.OCG_LoadScript.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32, ctypes.c_char_p]
-                self.lib.OCG_LoadScript.restype = ctypes.c_int
-                
-                self.lib.OCG_StartDuel.argtypes = [ctypes.c_void_p]
-                self.lib.OCG_StartDuel.restype = None
-                
-                self.lib.OCG_DestroyDuel.argtypes = [ctypes.c_void_p]
-                self.lib.OCG_DestroyDuel.restype = None
-                
-                self.lib.OCG_DuelProcess.argtypes = [ctypes.c_void_p]
-                self.lib.OCG_DuelProcess.restype = ctypes.c_int
-                
-                self.lib.OCG_DuelNewCard.argtypes = [ctypes.c_void_p, ctypes.POINTER(OCG_NewCardInfo)]
-                self.lib.OCG_DuelNewCard.restype = None
-                
-                self.lib.OCG_DuelQueryCount.argtypes = [ctypes.c_void_p, ctypes.c_uint8, ctypes.c_uint32]
-                self.lib.OCG_DuelQueryCount.restype = ctypes.c_uint32
-                
-                self.lib.OCG_DuelGetMessage.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
-                self.lib.OCG_DuelGetMessage.restype = ctypes.c_void_p
-                
-                self.lib.OCG_DuelSetResponse.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-                self.lib.OCG_DuelSetResponse.restype = None
-                
-                self.lib.OCG_DuelQueryLocation.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(OCG_QueryInfo)]
-                self.lib.OCG_DuelQueryLocation.restype = ctypes.c_void_p
-                
-                self.lib.OCG_DuelQueryField.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
-                self.lib.OCG_DuelQueryField.restype = ctypes.c_void_p
-                
-            except Exception as e:
-                raise EngineCrashError(f"Erreur lors du chargement de ocgcore: {e}")
-        else:
+        if not dll_path.is_file():
             raise EngineCrashError(f"Le moteur compilé est introuvable à l'emplacement: {dll_path}")
+            
+        try:
+            # Load DLL
+            self.lib = ctypes.CDLL(str(dll_path))
+            
+            global _engine_lib
+            _engine_lib = self.lib
+            
+            # Bind C functions for ocgcore-KCG
+            self.lib.OCG_CreateDuel.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(OCG_DuelOptions)]
+            self.lib.OCG_CreateDuel.restype = ctypes.c_int
+            
+            self.lib.OCG_LoadScript.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32, ctypes.c_char_p]
+            self.lib.OCG_LoadScript.restype = ctypes.c_int
+            
+            self.lib.OCG_StartDuel.argtypes = [ctypes.c_void_p]
+            self.lib.OCG_StartDuel.restype = None
+            
+            self.lib.OCG_DestroyDuel.argtypes = [ctypes.c_void_p]
+            self.lib.OCG_DestroyDuel.restype = None
+            
+            self.lib.OCG_DuelProcess.argtypes = [ctypes.c_void_p]
+            self.lib.OCG_DuelProcess.restype = ctypes.c_int
+            
+            self.lib.OCG_DuelNewCard.argtypes = [ctypes.c_void_p, ctypes.POINTER(OCG_NewCardInfo)]
+            self.lib.OCG_DuelNewCard.restype = None
+            
+            self.lib.OCG_DuelQueryCount.argtypes = [ctypes.c_void_p, ctypes.c_uint8, ctypes.c_uint32]
+            self.lib.OCG_DuelQueryCount.restype = ctypes.c_uint32
+            
+            self.lib.OCG_DuelGetMessage.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+            self.lib.OCG_DuelGetMessage.restype = ctypes.c_void_p
+            
+            self.lib.OCG_DuelSetResponse.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32]
+            self.lib.OCG_DuelSetResponse.restype = None
+            
+            self.lib.OCG_DuelQueryLocation.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(OCG_QueryInfo)]
+            self.lib.OCG_DuelQueryLocation.restype = ctypes.c_void_p
+            
+            self.lib.OCG_DuelQueryField.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+            self.lib.OCG_DuelQueryField.restype = ctypes.c_void_p
+            
+        except Exception as e:
+            raise EngineCrashError(f"Erreur lors du chargement de ocgcore: {e}")
 
     # --- Duel Lifecycle ---
 
@@ -344,13 +350,14 @@ class YgoEngine:
         scripts_dir = Path(__file__).parent.parent.parent / "data" / "scripts"
         
         # Charger les scripts système obligatoires avant de démarrer
-        for script_name in ["constant.lua", "utility.lua"]:
+        for script_name in ["constant.lua", "utility.lua", "procedure.lua"]:
             path = scripts_dir / script_name
             if path.exists():
                 with open(path, "rb") as f:
                     content = f.read()
-                    buf = ctypes.create_string_buffer(content, len(content))
-                    self.lib.OCG_LoadScript(self.duel_ptr, buf, len(content), script_name.encode('utf-8'))
+                    res = self.lib.OCG_LoadScript(self.duel_ptr, content, len(content), script_name.encode('utf-8'))
+                    import logging
+                    logging.info(f"Chargement {script_name} : res={res}, len={len(content)}")
             else:
                 import logging
                 logging.warning(f"Script système manquant : {script_name}")
@@ -368,19 +375,37 @@ class YgoEngine:
         if not self._duel_valid:
             return [{"action_type": 0, "source": "no_valid_duel"}]
             
-        try:
-            status = 2 # OCG_DUEL_STATUS_CONTINUE
+        loop_count = 0
+        while True:
             # Boucler tant que le moteur indique qu'il doit continuer (2)
-            while status == 2:
-                status = self.lib.OCG_DuelProcess(self.duel_ptr)
+            while True:
+                flags = self.lib.OCG_DuelProcess(self.duel_ptr)
+                if flags != 2: break
             
             # 1 = AWAITING, 0 = END
             actions = self._extract_actions(self.duel_ptr)
-            return actions
-        except Exception as e:
-            import logging
-            logging.error(f"Erreur dans get_legal_actions: {e}")
-            return [{"action_type": 0, "source": "engine_error"}]
+            loop_count += 1
+            
+            has_auto = False
+            has_select = False
+            for act in actions:
+                msg = act.get("msg")
+                if msg in ["MSG_SELECT_IDLECMD", "MSG_SELECT_BATTLECMD", "MSG_SELECT_CARD", "MSG_SELECT_CHAIN", "WIN"]:
+                    has_select = True
+                if act.get("is_auto"):
+                    has_auto = True
+                    reply_bytes = act.get("auto_reply", b"\x00")
+                    buffer = ctypes.create_string_buffer(reply_bytes, len(reply_bytes))
+                    self.lib.OCG_DuelSetResponse(self.duel_ptr, buffer, len(buffer))
+                    break
+                    
+            if has_select and not has_auto:
+                return actions
+                
+            if loop_count > 100:
+                print(f"[DEBUG WRAPPER] INF LOOP DETECTED! flags={flags}, actions={[a.get('msg') for a in actions]}")
+                import time
+                time.sleep(1)
 
     def _apply_state(self, state: Dict[str, Any]):
         """Applique un état au duel actif (ajout de cartes, etc.)."""
@@ -412,6 +437,17 @@ class YgoEngine:
                         response_bytes = struct.pack("<I", response_value)
                         break
                 if response_bytes: break
+                
+            elif msg_block.get("msg") == "MSG_SELECT_CHAIN":
+                for choice in msg_block.get("choices", []):
+                    if choice.get("action_idx") == action_idx:
+                        s = choice.get("engine_index", 0)
+                        if s == -1: # SKIP
+                            response_bytes = struct.pack("<i", -1)
+                        else:
+                            response_bytes = struct.pack("<i", s)
+                        break
+                if response_bytes: break
             
             elif msg_block.get("msg") == "MSG_SELECT_CARD":
                 for choice in msg_block.get("choices", []):
@@ -419,17 +455,16 @@ class YgoEngine:
                         s = choice.get("engine_index", 0)
                         min_c = msg_block.get("min", 1)
                         
-                        # Remplissage des bytes
-                        bytes_list = [s]
-                        
-                        # Auto-complétion pour min > 1 (MVP)
+                        # Collect card indices
+                        indices = [s]
                         auto_idx = 0
-                        while len(bytes_list) < min_c:
+                        while len(indices) < min_c:
                             if auto_idx != s:
-                                bytes_list.append(auto_idx)
+                                indices.append(auto_idx)
                             auto_idx += 1
-                            
-                        response_bytes = struct.pack(f"<{len(bytes_list)}B", *bytes_list)
+                        
+                        # Format YGOPro: un byte par index
+                        response_bytes = struct.pack(f"<{len(indices)}B", *indices)
                         break
                 if response_bytes: break
                 
@@ -437,8 +472,8 @@ class YgoEngine:
         if response_bytes is None:
             response_bytes = struct.pack("<I", action_idx)
             
-        buffer = ctypes.create_string_buffer(response_bytes, 64)
-        self.lib.OCG_DuelSetResponse(self.duel_ptr, buffer)
+        buffer = ctypes.create_string_buffer(response_bytes, len(response_bytes))
+        self.lib.OCG_DuelSetResponse(self.duel_ptr, buffer, len(response_bytes))
 
     def _extract_actions(self, duel_ptr) -> List[Dict[str, Any]]:
         """Extrait les actions depuis les messages du moteur via BinaryReader."""
@@ -455,35 +490,110 @@ class YgoEngine:
         buffer = ctypes.string_at(msg_ptr, length.value)
         
         from core.ygoenv.utils import BinaryReader
-        from core.ygoenv.constants import MSG_WIN, MSG_SELECT_IDLECMD, MSG_SELECT_BATTLECMD, MSG_SELECT_CARD
+        from core.ygoenv.constants import (
+            MSG_WIN, MSG_SELECT_IDLECMD, MSG_SELECT_BATTLECMD, MSG_SELECT_CARD,
+            MSG_SELECT_CHAIN, MSG_SELECT_POSITION, MSG_SELECT_PLACE,
+            MSG_SELECT_YESNO, MSG_SELECT_OPTION, MSG_SELECT_EFFECTYN,
+            MSG_RETRY
+        )
         reader = BinaryReader(buffer)
         
         actions = []
         
         try:
             while not reader.eof():
+                msg_length = reader.read_uint32()
+                if msg_length == 0:
+                    continue
+                    
+                start_offset = reader.offset
                 msg_type = reader.read_uint8()
                 
-                if msg_type == MSG_WIN:
+                if msg_type == MSG_RETRY:
+                    raise Exception(f"MSG_RETRY (1) received! Last action sent to the engine was INVALID. actions so far: {actions}")
+                
+                # Auto-completion messages
+                if msg_type in [MSG_SELECT_POSITION, MSG_SELECT_PLACE, MSG_SELECT_YESNO, 
+                                MSG_SELECT_OPTION, MSG_SELECT_EFFECTYN]:
+                    
+                    auto_reply = b"\x00\x00\x00\x00"
+                    
+                    if msg_type == MSG_SELECT_YESNO:
+                        player = reader.read_uint8()
+                        desc = reader.read_uint64()
+                        auto_reply = struct.pack("<I", 1) # ALWAYS YES (1)
+                        
+                    elif msg_type == MSG_SELECT_EFFECTYN:
+                        player = reader.read_uint8()
+                        code = reader.read_uint32()
+                        
+                        # loc_info: u8 controler, u8 location, u32 sequence, u32 position (10 bytes, no padding)
+                        controler = reader.read_uint8()
+                        location = reader.read_uint8()
+                        sequence = reader.read_uint32()
+                        position = reader.read_uint32()
+                        
+                        desc = reader.read_uint64()
+                        auto_reply = struct.pack("<I", 1) # ALWAYS YES (1)
+                        
+                    elif msg_type == MSG_SELECT_OPTION:
+                        player = reader.read_uint8()
+                        count = reader.read_uint8()
+                        for _ in range(count):
+                            reader.read_uint64()
+                        auto_reply = struct.pack("<I", 0) # FIRST OPTION (0)
+                        
+                    elif msg_type == MSG_SELECT_POSITION:
+                        player = reader.read_uint8()
+                        code = reader.read_uint32()
+                        positions = reader.read_uint8()
+                        # Pick the first valid position from the bitmask
+                        pos_val = 1  # POS_FACEUP_ATTACK default
+                        for p in [1, 2, 4, 8]:
+                            if positions & p:
+                                pos_val = p
+                                break
+                        auto_reply = struct.pack("<I", pos_val)
+                        
+                    elif msg_type == MSG_SELECT_PLACE:
+                        player = reader.read_uint8()
+                        count = reader.read_uint8()
+                        flag = reader.read_uint32()
+                        
+                        flag_inv = ~flag
+                        reply_bytes = []
+                        for _ in range(count):
+                            if flag_inv & 0x7f: reply_bytes.extend([1, 4, 0])
+                            elif flag_inv & 0x1f00: reply_bytes.extend([1, 8, 0])
+                            elif flag_inv & 0xc000: reply_bytes.extend([1, 8, 6])
+                            elif flag_inv & 0x7f0000: reply_bytes.extend([0, 4, 0])
+                            elif flag_inv & 0x1f000000: reply_bytes.extend([0, 8, 0])
+                            else: reply_bytes.extend([0, 8, 6])
+                            
+                        auto_reply = struct.pack(f"<{len(reply_bytes)}B", *reply_bytes)
+                        
+                        
+                    actions.append({"action_type": 1, "source": "engine_process", "msg": msg_type, "is_auto": True, "auto_reply": auto_reply})
+                
+                elif msg_type == MSG_WIN:
                     player = reader.read_uint8()
                     reason = reader.read_uint8()
                     actions.append({"action_type": 0, "source": "engine_process", "msg": "WIN", "player": player, "reason": reason})
-                    continue
-                
+                    
                 elif msg_type == MSG_SELECT_BATTLECMD:
                     player = reader.read_uint8()
                     battle_actions = []
                     
-                    OFFSET_ATTACK = 153
                     OFFSET_BATTLE_ACTIVATE = 173
+                    OFFSET_ATTACK = 153
                     
-                    # 1. Activatable (select_chains, type: 0)
+                    # 1. Activatable chains (type: 0)
                     count = reader.read_uint32()
                     for i in range(count):
                         code = reader.read_uint32()
                         con = reader.read_uint8()
                         loc = reader.read_uint8()
-                        seq = reader.read_uint8()
+                        seq = reader.read_uint32()
                         desc = reader.read_uint64()
                         client_mode = reader.read_uint8()
                         idx = OFFSET_BATTLE_ACTIVATE + i
@@ -505,7 +615,7 @@ class YgoEngine:
                     ep = reader.read_uint8()
                     
                     if m2: battle_actions.append({"type": "MAIN_PHASE_2", "engine_type": 2, "engine_index": 0, "action_idx": 190})
-                    if ep: battle_actions.append({"type": "END_PHASE", "engine_type": 3, "engine_index": 0, "action_idx": 151}) # Note: 151 est To EP dans notre plan global
+                    if ep: battle_actions.append({"type": "END_PHASE", "engine_type": 3, "engine_index": 0, "action_idx": 151})
                     
                     actions.append({
                         "action_type": 1, 
@@ -514,7 +624,6 @@ class YgoEngine:
                         "player": player, 
                         "choices": battle_actions
                     })
-                    break
                     
                 elif msg_type == MSG_SELECT_CARD:
                     player = reader.read_uint8()
@@ -528,10 +637,11 @@ class YgoEngine:
                     
                     for i in range(count):
                         code = reader.read_uint32()
-                        con = reader.read_uint8()
-                        loc = reader.read_uint8()
-                        seq = reader.read_uint8()
-                        pos = reader.read_uint8()
+                        # loc_info: u8 controler, u8 location, u32 sequence, u32 position (10 bytes)
+                        controler = reader.read_uint8()
+                        location = reader.read_uint8()
+                        sequence = reader.read_uint32()
+                        position = reader.read_uint32()
                         
                         idx = OFFSET_SELECT_CARD + i
                         if idx <= 199:
@@ -541,9 +651,7 @@ class YgoEngine:
                                 "engine_index": i, 
                                 "action_idx": idx, 
                                 "code": code, 
-                                "loc": loc, 
-                                "seq": seq, 
-                                "pos": pos
+                                "info_loc": location
                             })
                             
                     actions.append({
@@ -556,13 +664,61 @@ class YgoEngine:
                         "cancelable": cancelable,
                         "choices": card_actions
                     })
-                    break
+
+                elif msg_type == MSG_SELECT_CHAIN:
+                    player = reader.read_uint8()
+                    spe_count = reader.read_uint8()
+                    forced = reader.read_uint8()
+                    hint1 = reader.read_uint32()
+                    hint2 = reader.read_uint32()
+                    count = reader.read_uint32()
+                    
+                    chain_actions = []
+                    OFFSET_CHAIN = 200 # Arbitrary offset for chains
+                    
+                    for i in range(count):
+                        code = reader.read_uint32()
+                        # loc_info: u8 controler, u8 location, u32 sequence, u32 position (10 bytes)
+                        controler = reader.read_uint8()
+                        location = reader.read_uint8()
+                        sequence = reader.read_uint32()
+                        position = reader.read_uint32()
+                        
+                        desc = reader.read_uint64()
+                        client_mode = reader.read_uint8()
+                        
+                        idx = OFFSET_CHAIN + i
+                        if idx <= 249:
+                            chain_actions.append({
+                                "type": "CHAIN",
+                                "engine_type": 0,
+                                "engine_index": i,
+                                "action_idx": idx,
+                                "code": code,
+                                "info_loc": location
+                            })
+                            
+                    if not forced:
+                        # Allow skip
+                        chain_actions.append({
+                            "type": "SKIP",
+                            "engine_type": 0,
+                            "engine_index": -1,
+                            "action_idx": 249
+                        })
+                        
+                    actions.append({
+                        "action_type": 1,
+                        "source": "engine_process",
+                        "msg": "MSG_SELECT_CHAIN",
+                        "player": player,
+                        "choices": chain_actions
+                    })
 
                 elif msg_type == MSG_SELECT_IDLECMD:
                     player = reader.read_uint8()
                     idle_actions = []
                     
-                    # Offsets pour notre Action Space statique
                     OFFSET_SUMMON = 0
                     OFFSET_SPSUMMON = 20
                     OFFSET_REPOS = 40
@@ -571,27 +727,27 @@ class YgoEngine:
                     OFFSET_ACTIVATE = 100
                     
                     # 1. Summonable (type: 0)
-                    count = reader.read_uint8()
+                    count = reader.read_uint32()
                     for i in range(count):
                         code = reader.read_uint32()
                         con = reader.read_uint8()
                         loc = reader.read_uint8()
-                        seq = reader.read_uint8()
+                        seq = reader.read_uint32()
                         idx = OFFSET_SUMMON + i
                         idle_actions.append({"type": "SUMMON", "engine_type": 0, "engine_index": i, "action_idx": idx, "code": code, "loc": loc, "seq": seq})
                         
                     # 2. SPSummonable (type: 1)
-                    count = reader.read_uint8()
+                    count = reader.read_uint32()
                     for i in range(count):
                         code = reader.read_uint32()
                         con = reader.read_uint8()
                         loc = reader.read_uint8()
-                        seq = reader.read_uint8()
+                        seq = reader.read_uint32()
                         idx = OFFSET_SPSUMMON + i
                         idle_actions.append({"type": "SPSUMMON", "engine_type": 1, "engine_index": i, "action_idx": idx, "code": code, "loc": loc, "seq": seq})
                         
                     # 3. Reposition (type: 2)
-                    count = reader.read_uint8()
+                    count = reader.read_uint32()
                     for i in range(count):
                         code = reader.read_uint32()
                         con = reader.read_uint8()
@@ -601,32 +757,34 @@ class YgoEngine:
                         idle_actions.append({"type": "REPOS", "engine_type": 2, "engine_index": i, "action_idx": idx, "code": code, "loc": loc, "seq": seq})
                         
                     # 4. MSet (type: 3)
-                    count = reader.read_uint8()
+                    count = reader.read_uint32()
                     for i in range(count):
                         code = reader.read_uint32()
                         con = reader.read_uint8()
                         loc = reader.read_uint8()
-                        seq = reader.read_uint8()
+                        seq = reader.read_uint32()
                         idx = OFFSET_MSET + i
                         idle_actions.append({"type": "MSET", "engine_type": 3, "engine_index": i, "action_idx": idx, "code": code, "loc": loc, "seq": seq})
                         
                     # 5. SSet (type: 4)
-                    count = reader.read_uint8()
+                    count = reader.read_uint32()
                     for i in range(count):
                         code = reader.read_uint32()
                         con = reader.read_uint8()
                         loc = reader.read_uint8()
-                        seq = reader.read_uint8()
+                        seq = reader.read_uint32()
                         idx = OFFSET_SSET + i
                         idle_actions.append({"type": "SSET", "engine_type": 4, "engine_index": i, "action_idx": idx, "code": code, "loc": loc, "seq": seq})
                         
                     # 6. Activate (type: 5)
-                    count = reader.read_uint8()
+                    count = reader.read_uint32()
                     for i in range(count):
                         code = reader.read_uint32()
                         con = reader.read_uint8()
                         loc = reader.read_uint8()
-                        seq = reader.read_uint8()
+                        seq = reader.read_uint32()
+                        desc = reader.read_uint64()
+                        client_mode = reader.read_uint8()
                         idx = OFFSET_ACTIVATE + i
                         idle_actions.append({"type": "ACTIVATE", "engine_type": 5, "engine_index": i, "action_idx": idx, "code": code, "loc": loc, "seq": seq})
                         
@@ -645,14 +803,15 @@ class YgoEngine:
                         "player": player, 
                         "choices": idle_actions
                     })
-                    break
                 
-                # Pour le prototype, on ignore les autres messages complexes (ça demande d'implanter tout le protocole)
-                actions.append({"action_type": 1, "source": "engine_process", "msg": msg_type})
-                continue
+                else:
+                    pass
+                    
+                # Toujours se synchroniser à la fin du message, qu'il soit connu ou non
+                reader.offset = start_offset + msg_length
                 
-        except EOFError:
-            pass
+        except Exception as e:
+            raise RuntimeError(f"EngineCrashError: Erreur lors du parsing C++ : {e}")
             
         return actions
 

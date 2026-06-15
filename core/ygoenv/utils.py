@@ -40,6 +40,13 @@ class BinaryReader:
         self.offset += 4
         return val
 
+    def read_uint64(self) -> int:
+        if self.offset + 8 > len(self.data):
+            raise EOFError("Fin de buffer atteinte")
+        val = struct.unpack_from("<Q", self.data, self.offset)[0]
+        self.offset += 8
+        return val
+
     def read_bytes(self, length: int) -> bytes:
         if self.offset + length > len(self.data):
             raise EOFError("Fin de buffer atteinte")
